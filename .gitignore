@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+.env
+results/*
+!results/.gitkeep
+data/*
+!data/.gitkeep
+!data/HumanEval.jsonl.gz
+

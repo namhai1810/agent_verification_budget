@@ -1,0 +1,11 @@
+# Generated/pinned for Python 3.10. Install the project itself with:
+#   python -m pip install -e '.[dev]'
+httpx==0.28.1
+matplotlib==3.10.7
+numpy==2.2.6
+pydantic==2.12.3
+PyYAML==6.0.3
+pytest==8.4.2
+pytest-cov==7.0.0
+ruff==0.14.2
+

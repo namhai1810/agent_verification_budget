@@ -1,0 +1,10 @@
+name: agent_verify
+channels:
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip=24.3.1
+  - setuptools=80.9.0
+  - pip:
+      - -e .[dev]
+

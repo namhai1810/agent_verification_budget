@@ -1,0 +1,23 @@
+# Copy this file, choose exact immutable model IDs, set prices, and explicitly
+# authorize spending. Do not commit API keys; export OPENAI_API_KEY instead.
+_base_: default.yaml
+models:
+  planner:
+    provider: openai_compatible
+    model_id: REPLACE_CHILD_MODEL_ID
+  coder:
+    provider: openai_compatible
+    model_id: REPLACE_CHILD_MODEL_ID
+  reviewer:
+    provider: openai_compatible
+    model_id: REPLACE_CHILD_MODEL_ID
+  teacher:
+    provider: openai_compatible
+    model_id: REPLACE_STRONG_PARENT_MODEL_ID
+  critic:
+    provider: openai_compatible
+    model_id: REPLACE_LIGHTWEIGHT_CRITIC_MODEL_ID
+budget:
+  max_spend_usd: 10.0
+  allow_paid_calls: false
+

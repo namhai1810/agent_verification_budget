@@ -1,0 +1,60 @@
+# Local two-model configuration for a single 48 GB GPU.
+# Ports 8011/8012 are used because port 8001 is currently occupied by an
+# unrelated uvicorn service on this host. Keep these URLs synchronized with
+# scripts/start_vllm_gpu2.sh if you change either port.
+_base_: default.yaml
+
+experiment:
+  name: h1_phase1_qwen25_gpu2
+  task_count: 4
+  repeated_pairs: 1
+
+models:
+  # CHILD MODEL: Planner, Coder, and Reviewer intentionally share one frozen
+  # model checkpoint but retain separate generation seeds and prompt versions.
+  planner:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    base_url: http://127.0.0.1:8011/v1
+    api_key_env: VLLM_API_KEY
+    max_output_tokens: 900
+  coder:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    base_url: http://127.0.0.1:8011/v1
+    api_key_env: VLLM_API_KEY
+    max_output_tokens: 1600
+  reviewer:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    base_url: http://127.0.0.1:8011/v1
+    api_key_env: VLLM_API_KEY
+    max_output_tokens: 1500
+
+  # PARENT/TEACHER MODEL: stronger checkpoint on a separate vLLM endpoint.
+  teacher:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+    base_url: http://127.0.0.1:8012/v1
+    api_key_env: VLLM_API_KEY
+    max_output_tokens: 1800
+    prompt_version: teacher-v2-downstream-aware
+
+  # Keep the independent risk critic deterministic and local for Phase 1.
+  critic:
+    provider: heuristic
+    model_id: deterministic-local-critic-v1
+
+provider:
+  # Fallback values; model-specific base_url values above take precedence.
+  base_url: http://127.0.0.1:8011/v1
+  api_key_env: VLLM_API_KEY
+  timeout_seconds: 300
+  max_retries: 1
+  response_format: json_schema
+
+budget:
+  # Local inference has no API charge. The explicit authorization guard remains
+  # enabled so an endpoint cannot be changed silently without visible intent.
+  max_spend_usd: 0.0
+  allow_paid_calls: true

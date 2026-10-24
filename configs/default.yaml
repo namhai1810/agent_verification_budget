@@ -1,0 +1,93 @@
+experiment:
+  name: h1_phase1
+  seed: 20261024
+  task_count: 4
+  task_offset: 0
+  task_selection: shuffled
+  repeated_pairs: 1
+  results_dir: results
+  resume: true
+  dataset:
+    name: openai_humaneval
+    source: bundled
+    path: data/HumanEval.jsonl.gz
+    upstream_commit: b9453e8f1865df0a0057a1383767caa400acfbcf
+    sha256: b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef
+
+# CHILD MODELS: fixed agents in the sequential workflow. They may share one
+# model ID, but are separate entries so later experiments can change them cleanly.
+models:
+  planner:
+    provider: mock
+    model_id: mock-child-planner-v1
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 1200
+    seed: 101
+    prompt_version: planner-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+  coder:
+    provider: mock
+    model_id: mock-child-coder-v1
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 2000
+    seed: 102
+    prompt_version: coder-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+  reviewer:
+    provider: mock
+    model_id: mock-child-reviewer-v1
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 2200
+    seed: 103
+    prompt_version: reviewer-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+
+  # PARENT/TEACHER MODEL: stronger model used only for the single intervention.
+  teacher:
+    provider: mock
+    model_id: mock-parent-teacher-v1
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 2400
+    seed: 201
+    prompt_version: teacher-v2-downstream-aware
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+
+  # Independent lightweight critic; it never sees tests, solutions, or outcomes.
+  critic:
+    provider: heuristic
+    model_id: deterministic-local-critic-v1
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 300
+    seed: 301
+    prompt_version: critic-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+
+provider:
+  # Used only by provider: openai_compatible. Keep secrets in the environment.
+  base_url: https://api.openai.com/v1
+  api_key_env: OPENAI_API_KEY
+  timeout_seconds: 120
+  max_retries: 2
+  response_format: json_schema
+
+budget:
+  max_spend_usd: 0.0
+  # Paid calls require BOTH this flag and AGENT_VERIFY_ALLOW_SPEND=YES.
+  allow_paid_calls: false
+
+evaluation:
+  sandbox: landlock_seccomp
+  timeout_seconds: 8
+  memory_mb: 512
+  max_processes: 64
+

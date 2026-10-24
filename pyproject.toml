@@ -1,0 +1,46 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "downstream-aware-verification"
+version = "0.1.0"
+description = "Reproducible Phase-1 experiments for downstream-aware verification in fixed agent workflows"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = {text = "MIT"}
+dependencies = [
+  "httpx==0.28.1",
+  "matplotlib==3.10.7",
+  "numpy==2.2.6",
+  "pydantic==2.12.3",
+  "PyYAML==6.0.3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.2",
+  "pytest-cov==7.0.0",
+  "ruff==0.14.2",
+]
+
+[project.scripts]
+agent-verify = "agent_verify.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/agent_verify/analysis/analyze_h1.py" = ["E501"]
+
