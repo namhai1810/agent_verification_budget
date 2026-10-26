@@ -1,0 +1,42 @@
+experiment:
+  name: c3_learned_sequential_budget_controller
+  seed: 20261026
+  output_dir: results/c3_sequential_controller
+  frozen_test_status: exploratory_previously_observed
+
+upstream:
+  joint_value_cost_config: configs/joint_value_cost.yaml
+  joint_value_cost_results: results/joint_value_cost
+  existing_policy_results: results/joint_value_cost/budget_evaluation/policy_results.csv
+
+training:
+  group_folds: 4
+  budget_quantiles: [0.00, 0.25, 0.50, 0.75, 1.00]
+  remaining_fraction_grid: [0.25, 0.50, 0.75, 1.00]
+  selection_token_weight: 0.01
+  selection_overshoot_weight: 0.10
+  min_action_margin: 0.0
+  candidates:
+    - n_estimators: 80
+      learning_rate: 0.03
+      max_depth: 2
+      min_samples_leaf: 12
+      subsample: 0.85
+      cost_penalty_scale: 0.03
+    - n_estimators: 120
+      learning_rate: 0.03
+      max_depth: 2
+      min_samples_leaf: 10
+      subsample: 0.90
+      cost_penalty_scale: 0.07
+    - n_estimators: 160
+      learning_rate: 0.02
+      max_depth: 3
+      min_samples_leaf: 10
+      subsample: 0.90
+      cost_penalty_scale: 0.10
+
+evaluation:
+  budget_quantiles: [0.00, 0.25, 0.50, 0.75, 1.00]
+  bootstrap_repetitions: 20000
+  variants: [continuation, myopic]
