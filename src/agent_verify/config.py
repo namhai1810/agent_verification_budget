@@ -14,18 +14,27 @@ class StrictModel(BaseModel):
 
 
 class DatasetConfig(StrictModel):
-    name: Literal["openai_humaneval"] = "openai_humaneval"
-    source: Literal["bundled"] = "bundled"
+    name: Literal["openai_humaneval", "livecodebench_code_generation_lite"] = "openai_humaneval"
+    source: Literal["bundled", "huggingface"] = "bundled"
     path: Path = Path("data/HumanEval.jsonl.gz")
-    upstream_commit: str
-    sha256: str
+    upstream_commit: str = ""
+    sha256: str = ""
+    config_name: str = ""
+    split: str = "test"
+    revision: str = ""
+    minimum_contest_date: str = ""
+    selection_seed: int = 42
+    selected_tasks_path: Path = Path("results/livecodebench/selected_tasks.json")
+    dataset_manifest_path: Path = Path("results/livecodebench/dataset_manifest.json")
+    official_evaluator_path: Path = Path(".vendor/LiveCodeBench")
+    official_evaluator_commit: str = ""
 
 
 class ExperimentConfig(StrictModel):
     name: str = "h1_phase1"
     seed: int = 20261024
-    task_count: int = Field(default=4, ge=1, le=164)
-    task_offset: int = Field(default=0, ge=0, le=163)
+    task_count: int = Field(default=4, ge=1, le=1000)
+    task_offset: int = Field(default=0, ge=0, le=999)
     task_selection: Literal["ordered", "shuffled"] = "shuffled"
     repeated_pairs: int = Field(default=1, ge=1)
     results_dir: Path = Path("results")
@@ -34,8 +43,12 @@ class ExperimentConfig(StrictModel):
 
     @model_validator(mode="after")
     def valid_slice(self) -> ExperimentConfig:
-        if self.task_offset + self.task_count > 164:
-            raise ValueError("task_offset + task_count must be <= 164")
+        # The pinned LiveCodeBench v6/date filter currently contains 175 eligible
+        # tasks. Keep the bound explicit so an offset-100 extension can collect
+        # the remaining 75 tasks without silently changing the frozen dataset.
+        upper = 164 if self.dataset.name == "openai_humaneval" else 175
+        if self.task_offset + self.task_count > upper:
+            raise ValueError(f"task_offset + task_count must be <= {upper} for {self.dataset.name}")
         return self
 
 
@@ -99,7 +112,18 @@ class AppConfig(StrictModel):
 
     @property
     def fingerprint(self) -> str:
-        payload = json.dumps(self.model_dump(mode="json"), sort_keys=True).encode()
+        payload_dict = self.model_dump(mode="json")
+        dataset = self.experiment.dataset
+        if dataset.name == "openai_humaneval":
+            # Keep historical HumanEval run IDs stable after adding Phase-3-only fields.
+            payload_dict["experiment"]["dataset"] = {
+                "name": dataset.name,
+                "source": dataset.source,
+                "path": str(dataset.path),
+                "upstream_commit": dataset.upstream_commit,
+                "sha256": dataset.sha256,
+            }
+        payload = json.dumps(payload_dict, sort_keys=True).encode()
         return hashlib.sha256(payload).hexdigest()
 
 
@@ -113,12 +137,20 @@ def _deep_merge(base: dict, overlay: dict) -> dict:
     return merged
 
 
-def load_config(path: str | Path) -> AppConfig:
-    config_path = Path(path).resolve()
+def _load_raw_config(config_path: Path, seen: set[Path] | None = None) -> dict:
+    seen = set() if seen is None else seen
+    config_path = config_path.resolve()
+    if config_path in seen:
+        raise ValueError(f"Config inheritance cycle at {config_path}")
+    seen.add(config_path)
     raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     base_name = raw.pop("_base_", None)
     if base_name:
-        base_path = (config_path.parent / base_name).resolve()
-        base_raw = yaml.safe_load(base_path.read_text(encoding="utf-8")) or {}
+        base_raw = _load_raw_config((config_path.parent / base_name).resolve(), seen)
         raw = _deep_merge(base_raw, raw)
-    return AppConfig.model_validate(raw)
+    seen.remove(config_path)
+    return raw
+
+
+def load_config(path: str | Path) -> AppConfig:
+    return AppConfig.model_validate(_load_raw_config(Path(path)))

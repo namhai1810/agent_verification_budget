@@ -13,11 +13,14 @@ from agent_verify.logging import JsonlStore, canonical_json
 from agent_verify.schemas import (
     CheckpointState,
     CodeArtifact,
+    CodeVerificationResult,
     InvocationContext,
     Message,
     PlanArtifact,
+    PlanVerificationResult,
     PublicTask,
     ReviewArtifact,
+    ReviewVerificationResult,
     VerificationResult,
     utc_now,
 )
@@ -54,6 +57,24 @@ _CHECKPOINT_GUIDANCE: dict[int, str] = {
 }
 
 
+def submission_contract(task: PublicTask) -> str:
+    if (
+        getattr(task, "benchmark", "humaneval") == "livecodebench"
+        and getattr(task, "input_mode", "function") == "stdin"
+    ):
+        return (
+            "This is a LiveCodeBench stdin/stdout submission. The final artifact must be a complete "
+            "Python program that reads stdin, writes only the required stdout, and does not hardcode "
+            "public examples. Hidden tests are unavailable."
+        )
+    if getattr(task, "benchmark", "humaneval") == "livecodebench":
+        return (
+            "This is a LiveCodeBench functional submission. Preserve the required function/class and "
+            "starter-code interface. Hidden tests are unavailable."
+        )
+    return "This is a HumanEval function submission. Preserve the required entry point and signature."
+
+
 def checkpoint_guidance(checkpoint_index: int) -> str:
     """Return the frozen, checkpoint-specific TeacherVerifier policy."""
     try:
@@ -64,6 +85,15 @@ def checkpoint_guidance(checkpoint_index: int) -> str:
 
 def artifact_schema(checkpoint_index: int) -> type[BaseModel]:
     return {1: PlanArtifact, 2: CodeArtifact, 3: ReviewArtifact}[checkpoint_index]
+
+
+def verification_response_schema(checkpoint_index: int) -> type[BaseModel]:
+    """Return a checkpoint-specific envelope for constrained JSON decoding."""
+    return {
+        1: PlanVerificationResult,
+        2: CodeVerificationResult,
+        3: ReviewVerificationResult,
+    }[checkpoint_index]
 
 
 @dataclass(frozen=True)
@@ -94,7 +124,8 @@ class TeacherVerifier:
         context: InvocationContext,
     ) -> TeacherOutput:
         expected_schema = artifact_schema(checkpoint_state.checkpoint_index)
-        response_schema = VerificationResult.model_json_schema()
+        response_model = verification_response_schema(checkpoint_state.checkpoint_index)
+        response_schema = response_model.model_json_schema()
         guidance = checkpoint_guidance(checkpoint_state.checkpoint_index)
         messages = [
             Message(
@@ -110,19 +141,24 @@ class TeacherVerifier:
                     "style-only rewrite. Correct only identifiable mistakes and make the smallest "
                     "sufficient correction. You have no hidden tests, canonical solution, execution "
                     "feedback, or permission to change workflow/model settings.\n\n"
-                    "CHECKPOINT-SPECIFIC DUTY:\n"
+                    "SUBMISSION CONTRACT:\n"
+                    + submission_contract(task)
+                    + "\n\nCHECKPOINT-SPECIFIC DUTY:\n"
                     + guidance
                     + "\n\ncorrected_artifact must match ARTIFACT_SCHEMA. Set changed=true if and "
                     "only if corrected_artifact differs from CURRENT_ARTIFACT. Return only JSON matching "
-                    "RESPONSE_SCHEMA.\nRESPONSE_SCHEMA:\n"
-                    + json.dumps(response_schema, sort_keys=True)
+                    "RESPONSE_SCHEMA.\nRESPONSE_SCHEMA:\n" + json.dumps(response_schema, sort_keys=True)
                 ),
             ),
             Message(
                 role="user",
                 content=(
-                    f"TASK_ID: {task.task_id}\nCHECKPOINT: {checkpoint_state.checkpoint_index}\n"
-                    f"AGENT_ROLE: {checkpoint_state.role}\nENTRY_POINT: {task.entry_point}\n\n"
+                    f"TASK_ID: {task.task_id}\n"
+                    f"BENCHMARK: {getattr(task, 'benchmark', 'humaneval')}\n"
+                    f"INPUT_MODE: {getattr(task, 'input_mode', 'function')}\n"
+                    f"CHECKPOINT: {checkpoint_state.checkpoint_index}\n"
+                    f"AGENT_ROLE: {checkpoint_state.role}\n"
+                    f"ENTRY_POINT: {task.entry_point or 'N/A (stdin/stdout program)'}\n\n"
                     f"PROBLEM:\n{task.prompt}\n\n"
                     f"PRECEDING_ARTIFACTS:\n{json.dumps(checkpoint_state.preceding_artifacts)}\n\n"
                     f"CURRENT_ARTIFACT:\n{original_artifact.model_dump_json()}\n\n"
@@ -135,9 +171,9 @@ class TeacherVerifier:
             llm_result = self.client.invoke(
                 model=self.model,
                 messages=messages,
-                output_schema=VerificationResult,
+                output_schema=response_model,
                 context=context,
-                mock_factory=lambda: VerificationResult(
+                mock_factory=lambda: response_model(
                     verdict="uncertain",
                     corrected_artifact=original_artifact,
                     explanation="Mock teacher preserves the artifact; no semantic verification occurred.",

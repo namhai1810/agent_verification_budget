@@ -1,0 +1,142 @@
+experiment:
+  name: joint_value_cost_learning
+  seed: 20261026
+  output_dir: results/joint_value_cost
+  frozen_test_status: exploratory_previously_observed
+
+data:
+  humaneval:
+    results_dir: results
+    dataset_path: data/HumanEval.jsonl.gz
+    run_id: h1_phase1_qwen25_gpu2-09092ebd5e-d03859f54f
+  livecodebench:
+    - results_dir: results/livecodebench
+      run_id: h1_livecodebench_v6_qwen25_gpu2-20646527df-9e5e2e077f
+    - results_dir: results/livecodebench_hard_extension
+      run_id: h1_livecodebench_v6_hard_extension_qwen25_gpu2-d6cd8c8193-28e3450171
+
+frozen_split:
+  manifest_path: results/combined_phase2_optimized/fixed_test_tasks.json
+  assignments_path: results/combined_phase2_optimized/split_assignments.csv
+  require_exact_universe: true
+
+training:
+  group_folds: 4
+  temperature_grid: [0.50, 0.75, 1.00, 1.25, 1.50, 2.00, 3.00]
+  selection_weights:
+    helpful_auprc: 1.0
+    harmful_auprc: 0.5
+    gain_correlation: 0.25
+    value_log_loss: 0.10
+    cost_relative_error: 0.25
+
+models:
+  joint:
+    candidates:
+      - hidden_dim: 16
+        max_features: 4000
+        svd_components: 24
+        learning_rate: 0.010
+        epochs: 300
+        batch_size: 64
+        lambda_cost: 0.10
+        quantile_weight: 0.25
+        cost_quantile: 0.90
+        huber_delta: 1.0
+        l2: 0.0001
+        class_balanced: true
+        domain_balanced: false
+      - hidden_dim: 32
+        max_features: 4000
+        svd_components: 32
+        learning_rate: 0.005
+        epochs: 400
+        batch_size: 64
+        lambda_cost: 0.25
+        quantile_weight: 0.25
+        cost_quantile: 0.90
+        huber_delta: 1.0
+        l2: 0.0005
+        class_balanced: true
+        domain_balanced: false
+      - hidden_dim: 32
+        max_features: 4000
+        svd_components: 32
+        learning_rate: 0.005
+        epochs: 400
+        batch_size: 64
+        lambda_cost: 0.50
+        quantile_weight: 0.25
+        cost_quantile: 0.90
+        huber_delta: 1.0
+        l2: 0.0005
+        class_balanced: true
+        domain_balanced: true
+      - hidden_dim: 48
+        max_features: 4000
+        svd_components: 48
+        learning_rate: 0.003
+        epochs: 450
+        batch_size: 64
+        lambda_cost: 1.00
+        quantile_weight: 0.25
+        cost_quantile: 0.90
+        huber_delta: 1.0
+        l2: 0.001
+        class_balanced: true
+        domain_balanced: true
+  separate:
+    candidates:
+      - C: 0.1
+        max_features: 4000
+        svd_components: 24
+        huber_epsilon: 1.35
+        cost_alpha: 0.0001
+        cost_quantile: 0.90
+        quantile_estimators: 100
+        quantile_depth: 2
+        quantile_learning_rate: 0.05
+        max_iter: 2000
+        class_balanced: true
+        domain_balanced: false
+      - C: 1.0
+        max_features: 4000
+        svd_components: 32
+        huber_epsilon: 1.35
+        cost_alpha: 0.0001
+        cost_quantile: 0.90
+        quantile_estimators: 140
+        quantile_depth: 2
+        quantile_learning_rate: 0.05
+        max_iter: 2000
+        class_balanced: true
+        domain_balanced: false
+      - C: 1.0
+        max_features: 4000
+        svd_components: 32
+        huber_epsilon: 1.50
+        cost_alpha: 0.001
+        cost_quantile: 0.90
+        quantile_estimators: 140
+        quantile_depth: 2
+        quantile_learning_rate: 0.05
+        max_iter: 2000
+        class_balanced: true
+        domain_balanced: true
+
+policy:
+  max_teacher_calls_per_task: 1
+  gain_per_1k_thresholds: [-0.05, 0.00, 0.005, 0.01, 0.02, 0.03, 0.05, 0.10]
+  budget_quantiles: [0.00, 0.25, 0.50, 0.75, 1.00]
+
+evaluation:
+  bootstrap_repetitions: 20000
+  calibration_bins: 10
+
+legacy_baselines:
+  humaneval:
+    compact_predictions: results/combined_phase2_optimized/predictions/humaneval_compact.csv
+  livecodebench:
+    compact_predictions: results/combined_phase2_optimized/predictions/livecodebench_compact.csv
+  combined:
+    compact_predictions: results/combined_phase2_optimized/predictions/combined_compact.csv

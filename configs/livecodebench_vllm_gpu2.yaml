@@ -1,0 +1,46 @@
+# Phase 3: pinned LiveCodeBench v6 experiment on the existing two vLLM endpoints.
+_base_: vllm_gpu2.yaml
+
+experiment:
+  name: h1_livecodebench_v6_qwen25_gpu2
+  seed: 42
+  task_count: 100
+  task_offset: 0
+  task_selection: ordered
+  repeated_pairs: 1
+  results_dir: results/livecodebench
+  resume: true
+  dataset:
+    name: livecodebench_code_generation_lite
+    source: huggingface
+    path: data/unused-for-livecodebench
+    upstream_commit: 175d0ac20500fd7aa0813f7a2e6ae7ecad3c76c9
+    sha256: 57d726aaa48f15c649f95379524bbd009c91b348b02c71892d9858adb34c91ad
+    config_name: v6
+    split: test
+    revision: 175d0ac20500fd7aa0813f7a2e6ae7ecad3c76c9
+    minimum_contest_date: "2025-01-01"
+    selection_seed: 42
+    selected_tasks_path: results/livecodebench/selected_tasks.json
+    dataset_manifest_path: results/livecodebench/dataset_manifest.json
+    official_evaluator_path: .vendor/LiveCodeBench
+    official_evaluator_commit: 28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24
+
+models:
+  planner:
+    prompt_version: planner-v2-livecodebench
+  coder:
+    prompt_version: coder-v2-livecodebench-io-aware
+    max_output_tokens: 3000
+  reviewer:
+    prompt_version: reviewer-v2-livecodebench-io-aware
+    max_output_tokens: 3000
+  teacher:
+    prompt_version: teacher-v3-livecodebench-downstream-aware
+    max_output_tokens: 3000
+
+evaluation:
+  sandbox: landlock_seccomp
+  timeout_seconds: 8
+  memory_mb: 1024
+  max_processes: 1

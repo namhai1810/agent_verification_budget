@@ -1,0 +1,18 @@
+# LiveCodeBench v6 extension: tasks 100..174 of the frozen 175-task list.
+# A separate results directory keeps the original 100-task run auditable and
+# prevents its run/config fingerprint from being mixed with this Hard subset.
+_base_: livecodebench_vllm_gpu2.yaml
+
+experiment:
+  name: h1_livecodebench_v6_hard_extension_qwen25_gpu2
+  seed: 42
+  task_count: 75
+  task_offset: 100
+  task_selection: ordered
+  repeated_pairs: 1
+  results_dir: results/livecodebench_hard_extension
+  resume: true
+  dataset:
+    selected_tasks_path: results/livecodebench_hard_extension/selected_tasks.json
+    dataset_manifest_path: results/livecodebench_hard_extension/dataset_manifest.json
+

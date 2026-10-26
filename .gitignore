@@ -5,9 +5,11 @@ __pycache__/
 .ruff_cache/
 .coverage
 .env
+.vendor/
 results/*
 !results/.gitkeep
 data/*
 !data/.gitkeep
 !data/HumanEval.jsonl.gz
 
+*.orig

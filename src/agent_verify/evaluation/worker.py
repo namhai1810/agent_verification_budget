@@ -187,13 +187,45 @@ def probe_isolation() -> int:
     return 0 if checks["isolation_ok"] else 1
 
 
+def _livecodebench_result(run_test, payload: dict) -> dict:
+    sample = {"input_output": payload["input_output"]}
+    results, metadata = run_test(
+        sample,
+        test=payload["code"],
+        debug=False,
+        timeout=int(payload["per_test_timeout"]),
+    )
+    normalized = [bool(value) if type(value).__name__ == "bool_" else value for value in results]
+    if normalized and all(value is True for value in normalized):
+        return {"passed": True, "status": "PASS", "official_metadata": metadata}
+    error_code = int(metadata.get("error_code", 0) or 0)
+    if error_code == -3 or -3 in normalized:
+        status = "TIMEOUT"
+    elif error_code == -4 or -4 in normalized:
+        status = "RUNTIME_ERROR"
+    elif error_code in {-1, -2} or any(value in {-1, -2, False} for value in normalized):
+        status = "FAIL"
+    else:
+        status = "EVALUATOR_ERROR"
+    return {"passed": False, "status": status, "official_metadata": metadata}
+
+
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--probe-isolation":
         return probe_isolation()
     started = time.perf_counter()
+    mode = "humaneval"
     try:
         with open(sys.argv[1], encoding="utf-8") as handle:
             payload = json.load(handle)
+        mode = str(payload.get("mode", "humaneval"))
+        run_test = None
+        if mode == "livecodebench":
+            # Import trusted upstream code before Landlock removes repository access.
+            sys.path.insert(0, str(Path(payload["official_repo"]).resolve()))
+            from lcb_runner.evaluation.testing_util import run_test as official_run_test
+
+            run_test = official_run_test
         try:
             restrict_filesystem()
             restrict_syscalls()
@@ -205,12 +237,19 @@ def main() -> int:
             }
             print(json.dumps(result, sort_keys=True), flush=True)
             return 0
-        namespace: dict = {}
-        source = payload["code"] + "\n" + payload["test"] + "\ncheck(" + payload["entry_point"] + ")\n"
-        exec(compile(source, "<isolated-humaneval>", "exec"), namespace, namespace)
-        result = {"passed": True, "status": "passed"}
+
+        if mode == "livecodebench":
+            if run_test is None:
+                raise RuntimeError("Official LiveCodeBench evaluator was not loaded")
+            result = _livecodebench_result(run_test, payload)
+        else:
+            namespace: dict = {}
+            source = payload["code"] + "\n" + payload["test"] + "\ncheck(" + payload["entry_point"] + ")\n"
+            exec(compile(source, "<isolated-humaneval>", "exec"), namespace, namespace)
+            result = {"passed": True, "status": "passed"}
     except BaseException as exc:  # The sandbox must contain arbitrary generated code.
-        result = {"passed": False, "status": f"failed:{type(exc).__name__}"}
+        prefix = "EVALUATOR_ERROR" if mode == "livecodebench" else "failed"
+        result = {"passed": False, "status": f"{prefix}:{type(exc).__name__}"}
     result["worker_seconds"] = time.perf_counter() - started
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0

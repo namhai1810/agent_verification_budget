@@ -18,12 +18,31 @@ class PublicTask(StrictModel):
     entry_point: str
 
 
+class LiveCodeBenchPublicTask(PublicTask):
+    benchmark: Literal["livecodebench"] = "livecodebench"
+    title: str
+    difficulty: Literal["easy", "medium", "hard"]
+    platform: str
+    contest_date: str
+    starter_code: str = ""
+    input_mode: Literal["function", "stdin"]
+
+
 class PrivateEvaluationCase(StrictModel):
     """Gold-only data. This type must never enter a model-facing method."""
 
     task_id: str
     test: str
     entry_point: str
+
+
+class LiveCodeBenchPrivateCase(StrictModel):
+    """Evaluator-only LiveCodeBench sample; never pass this object to an LLM-facing method."""
+
+    task_id: str
+    input_output: str
+    test_count: int
+    official_schema_version: str = "code_generation_lite-v6"
 
 
 class PlanArtifact(StrictModel):
@@ -76,6 +95,27 @@ Artifact = PlanArtifact | CodeArtifact | ReviewArtifact
 class VerificationResult(StrictModel):
     verdict: Literal["correct", "incorrect", "uncertain"]
     corrected_artifact: Artifact
+    explanation: str
+    changed: bool
+
+
+class PlanVerificationResult(StrictModel):
+    verdict: Literal["correct", "incorrect", "uncertain"]
+    corrected_artifact: PlanArtifact
+    explanation: str
+    changed: bool
+
+
+class CodeVerificationResult(StrictModel):
+    verdict: Literal["correct", "incorrect", "uncertain"]
+    corrected_artifact: CodeArtifact
+    explanation: str
+    changed: bool
+
+
+class ReviewVerificationResult(StrictModel):
+    verdict: Literal["correct", "incorrect", "uncertain"]
+    corrected_artifact: ReviewArtifact
     explanation: str
     changed: bool
 

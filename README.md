@@ -162,3 +162,24 @@ Script mặc định chọn manifest mới nhất, flatten raw JSONL thành CSV 
 ```bash
 bash scripts/visualize_results.sh --run-id <run_id>
 ```
+
+## Phase 3 — LiveCodeBench
+
+LiveCodeBench v6 đã có adapter, official evaluator bridge, sandbox, resume/progress, H1 reports và fixed-test predictor training riêng. Hướng dẫn đầy đủ, protocol đã pin và exact commands nằm tại [docs/livecodebench.md](docs/livecodebench.md).
+
+Chuẩn bị dataset/evaluator mà không gọi LLM:
+
+```bash
+conda activate agent_verify
+bash scripts/setup_livecodebench.sh
+bash scripts/run_livecodebench_pilot.sh --prepare-only
+```
+
+Chạy đủ 100 tasks chỉ khi hai vLLM endpoints đã sẵn sàng:
+
+```bash
+bash scripts/run_livecodebench_pilot.sh \
+  --task-count 100 --seed 42 --repeated-pairs 1 --resume
+```
+
+Phần implementation/test setup không tự chạy experiment 100 tasks và không tự train predictor.

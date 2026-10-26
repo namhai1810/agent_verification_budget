@@ -19,7 +19,12 @@ from agent_verify.workflow import FixedWorkflow
 
 
 class Phase1Experiment:
-    def __init__(self, config: AppConfig, project_root: Path | None = None) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        project_root: Path | None = None,
+        run_id_override: str | None = None,
+    ) -> None:
         self.config = config
         self.project_root = project_root or Path(__file__).resolve().parents[3]
         results_dir = config.experiment.results_dir
@@ -39,7 +44,25 @@ class Phase1Experiment:
         source_paths = list((self.project_root / "src").rglob("*.py"))
         source_paths.extend([self.project_root / "pyproject.toml"])
         self.software_hash = hash_paths(source_paths)
-        self.run_id = f"{config.experiment.name}-{config.fingerprint[:10]}-{self.software_hash[:10]}"
+        generated_run_id = f"{config.experiment.name}-{config.fingerprint[:10]}-{self.software_hash[:10]}"
+        self.resumed_manifest: dict | None = None
+        if run_id_override is not None:
+            if not config.experiment.resume:
+                raise ValueError("run_id_override requires experiment.resume=true")
+            matches = [
+                row
+                for row in self.manifests.read_all()
+                if row.get("record_type") == "manifest" and row.get("run_id") == run_id_override
+            ]
+            if not matches:
+                raise ValueError(f"Cannot resume unknown run_id: {run_id_override}")
+            manifest = matches[-1]
+            if manifest.get("config_fingerprint") != config.fingerprint:
+                raise ValueError("Resume run config fingerprint does not match the current config")
+            self.run_id = run_id_override
+            self.resumed_manifest = manifest
+        else:
+            self.run_id = generated_run_id
 
         spent = sum(
             float(row.get("cost_usd", 0.0))

@@ -10,11 +10,14 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
 dependencies = [
+  "datasets==4.2.0",
   "httpx==0.28.1",
   "matplotlib==3.10.7",
   "numpy==2.2.6",
   "pydantic==2.12.3",
   "PyYAML==6.0.3",
+  "scikit-learn==1.7.2",
+  "tqdm==4.67.1",
 ]
 
 [project.optional-dependencies]
@@ -43,4 +46,8 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/agent_verify/analysis/analyze_h1.py" = ["E501"]
-
+"scripts/analyze_h1_offline.py" = ["E501"]
+"src/agent_verify/analysis/phase2.py" = ["E501"]
+"src/agent_verify/analysis/phase2_data.py" = ["E501"]
+"src/agent_verify/analysis/phase2_models.py" = ["E501"]
+"src/agent_verify/analysis/phase3_training.py" = ["E501"]

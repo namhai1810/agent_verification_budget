@@ -19,6 +19,7 @@ from agent_verify.verification.teacher import (
     TeacherVerifier,
     artifact_schema,
     checkpoint_guidance,
+    verification_response_schema,
 )
 from agent_verify.workflow import FixedWorkflow
 
@@ -174,6 +175,29 @@ def test_checkpoint_guidance_rejects_unknown_checkpoint():
         assert "Unsupported checkpoint index: 4" in str(exc)
     else:
         raise AssertionError("Expected unsupported checkpoint to raise ValueError")
+
+
+def test_cp3_teacher_response_schema_requires_review_artifact():
+    response_model = verification_response_schema(3)
+    schema = response_model.model_json_schema()
+    corrected = schema["properties"]["corrected_artifact"]
+    assert corrected["$ref"].endswith("/$defs/ReviewArtifact")
+    try:
+        response_model.model_validate(
+            {
+                "verdict": "incorrect",
+                "corrected_artifact": {
+                    "code": "print(1)\n",
+                    "implementation_notes": "This is a CodeArtifact, not a ReviewArtifact.",
+                },
+                "explanation": "Synthetic wrong shape.",
+                "changed": True,
+            }
+        )
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("CP3 must reject a CodeArtifact-shaped correction")
 
 
 def test_reviewer_derives_changed_and_logs_model_mismatch(default_config, tmp_path):

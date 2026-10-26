@@ -303,7 +303,7 @@ def plot_dashboard(metrics: dict[str, RunMetrics]) -> Path:
     change_ax.text(
         0.01,
         0.92,
-        "Critic correlation r = 0.223  •  134/139 tasks had ranking ties",
+        "Risk–delta r = 0.223  •  maximum-risk ties = 11/139",
         transform=change_ax.transAxes,
         fontsize=9.2,
         color=SLATE,

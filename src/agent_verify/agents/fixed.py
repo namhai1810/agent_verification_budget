@@ -26,6 +26,42 @@ def _schema_rule(schema: type[BaseModel]) -> str:
     )
 
 
+def _task_header(task: PublicTask) -> str:
+    entry = task.entry_point or "N/A (stdin/stdout program)"
+    benchmark = getattr(task, "benchmark", "humaneval")
+    input_mode = getattr(task, "input_mode", "function")
+    return f"TASK_ID: {task.task_id}\nBENCHMARK: {benchmark}\nINPUT_MODE: {input_mode}\nENTRY_POINT: {entry}"
+
+
+def _submission_rule(task: PublicTask) -> str:
+    if (
+        getattr(task, "benchmark", "humaneval") == "livecodebench"
+        and getattr(task, "input_mode", "function") == "stdin"
+    ):
+        return (
+            "Implement the competitive-programming task as a complete self-contained Python program. "
+            "The program must read from standard input and write only the required answer to standard "
+            "output. Do not hardcode public examples, include tests, or use Markdown fences. "
+        )
+    if getattr(task, "benchmark", "humaneval") == "livecodebench":
+        return (
+            "Implement the competitive-programming task as complete Python source using the required "
+            "function/class interface and starter-code contract. Do not read stdin unless requested. "
+            "Do not include tests or Markdown fences. "
+        )
+    return (
+        "Implement the HumanEval task as a complete self-contained Python source file. Preserve the "
+        "required function name and signature. Do not include tests or Markdown fences. "
+    )
+
+
+def _mock_code(task: PublicTask) -> str:
+    if getattr(task, "benchmark", "humaneval") == "livecodebench":
+        starter_code = getattr(task, "starter_code", "")
+        return (starter_code.rstrip() + "\n    pass\n") if starter_code.strip() else "pass\n"
+    return task.prompt + "pass\n"
+
+
 @dataclass(frozen=True)
 class AgentOutput:
     artifact: BaseModel
@@ -53,7 +89,7 @@ class PlannerAgent:
             ),
             Message(
                 role="user",
-                content=f"TASK_ID: {task.task_id}\nENTRY_POINT: {task.entry_point}\n\n{task.prompt}",
+                content=f"{_task_header(task)}\n\n{task.prompt}",
             ),
         ]
         result = self.client.invoke(
@@ -93,16 +129,15 @@ class CoderAgent:
             Message(
                 role="system",
                 content=(
-                    "You are the Coder in a frozen sequential coding workflow. Implement the HumanEval "
-                    "task as a complete self-contained Python source file. Preserve the required function "
-                    "name and signature. Do not include tests or Markdown fences. "
+                    "You are the Coder in a frozen sequential coding workflow. "
+                    + _submission_rule(task)
                     + _schema_rule(CodeArtifact)
                 ),
             ),
             Message(
                 role="user",
                 content=(
-                    f"TASK_ID: {task.task_id}\nENTRY_POINT: {task.entry_point}\n\n"
+                    f"{_task_header(task)}\n\n"
                     f"PROBLEM:\n{task.prompt}\n\nPLAN:\n{plan.model_dump_json(indent=2)}"
                 ),
             ),
@@ -113,7 +148,7 @@ class CoderAgent:
             output_schema=CodeArtifact,
             context=context,
             mock_factory=lambda: CodeArtifact(
-                code=task.prompt + "pass\n",
+                code=_mock_code(task),
                 implementation_notes=(
                     "Deterministic mock placeholder; it is intentionally not a research model output."
                 ),
@@ -148,16 +183,18 @@ class ReviewerAgent:
                 role="system",
                 content=(
                     "You are the Reviewer in a frozen sequential coding workflow. Inspect logic, syntax, "
-                    "edge cases, and consistency with the plan. Return the complete final Python source, "
-                    "correcting it only when justified. Set changed=true if and only if the returned "
-                    "code differs from CODE after ignoring leading/trailing whitespace. Do not include "
-                    "tests or Markdown fences. " + _schema_rule(ReviewArtifact)
+                    "edge cases, I/O/interface compliance, and consistency with the plan. "
+                    "Return the complete "
+                    "final Python source, correcting it only when justified. "
+                    + _submission_rule(task)
+                    + "Set changed=true if and only if the returned code differs from CODE after ignoring "
+                    "leading/trailing whitespace. " + _schema_rule(ReviewArtifact)
                 ),
             ),
             Message(
                 role="user",
                 content=(
-                    f"TASK_ID: {task.task_id}\nENTRY_POINT: {task.entry_point}\n\n"
+                    f"{_task_header(task)}\n\n"
                     f"PROBLEM:\n{task.prompt}\n\nPLAN:\n{plan.model_dump_json(indent=2)}\n\n"
                     f"CODE:\n{code.code}"
                 ),

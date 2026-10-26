@@ -140,6 +140,51 @@ def estimate_eta(
     return eta
 
 
+def estimate_recovery_eta(
+    invocations: list[dict[str, Any]],
+    evaluations: list[dict[str, Any]],
+    pairs: list[dict[str, Any]],
+    task_count: int,
+    repeated_pairs: int,
+) -> float:
+    """Estimate only the work needed for currently missing canonical pairs."""
+    role_latencies: dict[str, list[float]] = defaultdict(list)
+    for row in invocations:
+        role = row.get("context", {}).get("role", "unknown")
+        latency = float(row.get("latency_seconds", 0.0))
+        if latency > 0:
+            role_latencies[role].append(latency)
+    child = [value for role in ("planner", "coder", "reviewer") for value in role_latencies.get(role, [])]
+    child_fallback = mean(child) if child else 8.0
+    averages = {
+        "coder": mean(role_latencies["coder"]) if role_latencies["coder"] else child_fallback,
+        "reviewer": mean(role_latencies["reviewer"]) if role_latencies["reviewer"] else child_fallback,
+        "teacher": mean(role_latencies["teacher"]) if role_latencies["teacher"] else child_fallback * 2.5,
+    }
+    target_per_checkpoint = task_count * repeated_pairs
+    completed_by_checkpoint = defaultdict(int)
+    for row in pairs:
+        completed_by_checkpoint[int(row["checkpoint"])] += 1
+    missing = {
+        checkpoint: max(0, target_per_checkpoint - completed_by_checkpoint[checkpoint])
+        for checkpoint in (1, 2, 3)
+    }
+    remaining_roles = {
+        "coder": 2 * missing[1],
+        "reviewer": 2 * (missing[1] + missing[2]),
+        "teacher": sum(missing.values()),
+    }
+    evaluation_latencies = [
+        float(row.get("latency_seconds", 0.0))
+        for row in evaluations
+        if float(row.get("latency_seconds", 0.0)) > 0
+    ]
+    evaluation_average = mean(evaluation_latencies) if evaluation_latencies else 0.25
+    return sum(remaining_roles[role] * averages[role] for role in remaining_roles) + (
+        2 * sum(missing.values()) * evaluation_average
+    )
+
+
 def snapshot(
     results_dir: Path,
     run_id: str,
@@ -159,7 +204,17 @@ def snapshot(
     invocations = matching("llm_invocations.jsonl")
     evaluations = matching("evaluations.jsonl")
     events = matching("events.jsonl")
-    failures = sum(str(row.get("record_type", "")).endswith("_failure") for row in events)
+    completed_tasks = {str(row["task_id"]) for row in baselines}
+    completed_pair_ids = {str(row["pair_id"]) for row in pairs}
+    failures = 0
+    for row in events:
+        record_type = row.get("record_type")
+        if record_type == "baseline_failure" and str(row.get("task_id")) not in completed_tasks:
+            failures += 1
+        elif (
+            record_type == "paired_intervention_failure" and str(row.get("pair_id")) not in completed_pair_ids
+        ):
+            failures += 1
     warnings = sum(row.get("record_type") == "consistency_warning" for row in events)
 
     expected_roles = expected_role_counts(task_count, repeated_pairs)
@@ -167,11 +222,26 @@ def snapshot(
     expected_pairs = task_count * 3 * repeated_pairs
     expected_evaluations = task_count * (1 + 6 * repeated_pairs)
     completed_calls = min(len(invocations), expected_calls)
-    ratio = completed_calls / expected_calls if expected_calls else 1.0
+    recovering_missing_records = completed_calls >= expected_calls and len(pairs) < expected_pairs
+    if recovering_missing_records:
+        completed_records = len(baselines) + len(pairs)
+        expected_records = task_count + expected_pairs
+        ratio = completed_records / expected_records
+    else:
+        ratio = completed_calls / expected_calls if expected_calls else 1.0
     width = 28
     filled = min(width, int(width * ratio))
     bar = "█" * filled + "░" * (width - filled)
-    eta = estimate_eta(invocations, evaluations, expected_roles, expected_evaluations)
+    if recovering_missing_records:
+        eta = estimate_recovery_eta(
+            invocations,
+            evaluations,
+            pairs,
+            task_count,
+            repeated_pairs,
+        )
+    else:
+        eta = estimate_eta(invocations, evaluations, expected_roles, expected_evaluations)
     elapsed = time.monotonic() - started
 
     current = "waiting for first call"
@@ -179,10 +249,20 @@ def snapshot(
         context = invocations[-1].get("context", {})
         current = f"{context.get('task_id', '?')} / {context.get('role', '?')}"
 
+    calls_label = (
+        f"{len(invocations)} ({len(invocations) - expected_calls} recovery)"
+        if len(invocations) > expected_calls
+        else f"{len(invocations)}/{expected_calls}"
+    )
+    evaluations_label = (
+        f"{len(evaluations)} ({len(evaluations) - expected_evaluations} recovery)"
+        if len(evaluations) > expected_evaluations
+        else f"{len(evaluations)}/{expected_evaluations}"
+    )
     line = (
-        f"[{bar}] {ratio * 100:5.1f}% | calls {len(invocations)}/{expected_calls} | "
+        f"[{bar}] {ratio * 100:5.1f}% | calls {calls_label} | "
         f"baseline {len(baselines)}/{task_count} | pairs {len(pairs)}/{expected_pairs} | "
-        f"eval {len(evaluations)}/{expected_evaluations} | errors {failures} | warnings {warnings} | "
+        f"eval {evaluations_label} | errors {failures} | warnings {warnings} | "
         f"elapsed {format_duration(elapsed)} | ETA ~{format_duration(eta)} | {current}"
     )
     complete = len(baselines) >= task_count and len(pairs) >= expected_pairs
