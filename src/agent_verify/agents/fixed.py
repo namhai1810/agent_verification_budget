@@ -49,6 +49,12 @@ def _submission_rule(task: PublicTask) -> str:
             "function/class interface and starter-code contract. Do not read stdin unless requested. "
             "Do not include tests or Markdown fences. "
         )
+    if getattr(task, "benchmark", "humaneval") == "bigcodebench":
+        return (
+            "Implement the BigCodeBench task as complete Python source using the required public "
+            "function interface. Use only libraries explicitly permitted by the public problem. "
+            "Do not include tests, canonical answers, or Markdown fences. "
+        )
     return (
         "Implement the HumanEval task as a complete self-contained Python source file. Preserve the "
         "required function name and signature. Do not include tests or Markdown fences. "
@@ -59,6 +65,8 @@ def _mock_code(task: PublicTask) -> str:
     if getattr(task, "benchmark", "humaneval") == "livecodebench":
         starter_code = getattr(task, "starter_code", "")
         return (starter_code.rstrip() + "\n    pass\n") if starter_code.strip() else "pass\n"
+    if getattr(task, "benchmark", "humaneval") == "bigcodebench":
+        return "def candidate(*args, **kwargs):\n    pass\n"
     return task.prompt + "pass\n"
 
 

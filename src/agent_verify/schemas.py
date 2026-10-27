@@ -28,6 +28,15 @@ class LiveCodeBenchPublicTask(PublicTask):
     input_mode: Literal["function", "stdin"]
 
 
+class BigCodeBenchPublicTask(PublicTask):
+    """Public BigCodeBench instruction; gold code and tests are deliberately absent."""
+
+    benchmark: Literal["bigcodebench"] = "bigcodebench"
+    difficulty: str = "unknown"
+    libraries: list[str] = Field(default_factory=list)
+    input_mode: Literal["function"] = "function"
+
+
 class PrivateEvaluationCase(StrictModel):
     """Gold-only data. This type must never enter a model-facing method."""
 
@@ -43,6 +52,16 @@ class LiveCodeBenchPrivateCase(StrictModel):
     input_output: str
     test_count: int
     official_schema_version: str = "code_generation_lite-v6"
+
+
+class BigCodeBenchPrivateCase(StrictModel):
+    """Evaluator-only official tests; never pass this object to a model-facing method."""
+
+    task_id: str
+    test: str
+    entry_point: str
+    code_prompt: str = ""
+    official_schema_version: str = "bigcodebench"
 
 
 class PlanArtifact(StrictModel):

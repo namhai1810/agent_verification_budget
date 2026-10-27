@@ -29,6 +29,7 @@ dev = [
 
 [project.scripts]
 agent-verify = "agent_verify.cli:main"
+cbv-bench = "agent_verify.cbv_bench.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

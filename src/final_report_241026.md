@@ -1,8 +1,9 @@
-# Báo cáo tổng hợp — Downstream-Aware Verification, Phase 1–2
+# Báo cáo tổng hợp — Downstream-Aware Verification, Phase 1–CBV-Bench V2
 
-**Ngày chốt dữ liệu:** 24/10/2026  
-**Dataset:** OpenAI HumanEval, 164 tasks  
-**Trạng thái:** Phase 1 hoàn tất trên 139 paired-complete held-out tasks; Phase 2 đã train và đánh giá ba Downstream Value Predictors bằng nested task-grouped cross-validation.
+**Ngày khởi tạo báo cáo:** 24/10/2026  
+**Cập nhật gần nhất:** 27/10/2026  
+**Datasets:** HumanEval, LiveCodeBench v6; BigCodeBench đã lên lịch nhưng chưa bắt đầu collection  
+**Trạng thái hiện tại:** Phase 1–3 và các controller ML đã được phân tích; CBV-Bench V2 hoàn tất HumanEval Level 2, còn LiveCodeBench Level 2 ở trạng thái partial 171/175.
 
 > Báo cáo này được tổng hợp trực tiếp từ các JSONL records và run-specific reports. Các lần lặp `R=3` chỉ được dùng để kiểm tra tính tái lập, không được tính như ba tập task độc lập.
 
@@ -1052,3 +1053,197 @@ cd /home/llm/hainn/hainn/agent_verification_budget
 conda activate agent_verify
 bash scripts/train_livecodebench_only_phase2.sh
 ```
+
+## 26. CBV-Bench V2 — Level 2 multi-verification
+
+### 26.1. Mục tiêu và protocol
+
+CBV-Bench V2 mở rộng counterfactual collection từ single intervention sang toàn bộ tám
+chuỗi Verify/Skip tại ba checkpoint:
+
+```text
+SSS  VSS  SVS  SSV  VVS  VSV  SVV  VVV
+```
+
+Trong đó **S** là Skip Teacher và **V** là Verify bằng Teacher. Bốn chuỗi đầu là Level 1;
+bốn chuỗi cuối bổ sung multi-verification. Các nhánh dùng shared-prefix cache để tránh
+chạy lại phần workflow giống nhau.
+
+Phân tích ngày 27/10/2026 chỉ đọc dữ liệu đã thu thập, không gọi Student/Teacher và
+không train model. Để so sánh tám chuỗi công bằng, metric chỉ dùng task có đủ toàn bộ
+tám trajectory.
+
+### 26.2. Trạng thái collection
+
+| Dataset | Complete Level 2 | Dự kiến | Trạng thái |
+|---|---:|---:|---|
+| HumanEval | **163/163** | 163 | Hoàn chỉnh, validation và export thành công |
+| LiveCodeBench | **171/175** | 175 | Partial; bốn task lỗi collection |
+| BigCodeBench Level 1 | **0/1000** | 1000 | Chưa bắt đầu do pipeline dừng tại LiveCodeBench |
+| BigCodeBench Level 2 | **0/250** | 250 | Chưa bắt đầu do pipeline dừng tại LiveCodeBench |
+
+LiveCodeBench đã lưu 1,380 trajectories: 171 task có đủ tám nhánh, ba task chỉ có đủ
+Level 1 và một task chưa có trajectory hợp lệ. Vì vậy mọi bảng Level 2 bên dưới dùng
+matched subset 171 task; không trộn các sequence có cỡ mẫu khác nhau.
+
+![CBV-Bench Level 2 dashboard](../results/cbv_bench_analysis_26102026/figures/cbv_level2_dashboard.png)
+
+### 26.3. Accuracy theo fixed sequence
+
+| Dataset | Sequence | Accuracy | Delta so với SSS | Helpful | Harmful | Mean Teacher tokens/task |
+|---|---|---:|---:|---:|---:|---:|
+| HumanEval | SSS | 80.98% | +0.00 pp | 0 | 0 | 0 |
+| HumanEval | VSS | 82.82% | +1.84 pp | 6 | 3 | 1,540 |
+| HumanEval | SVS | 84.05% | +3.07 pp | 7 | 2 | 1,567 |
+| HumanEval | SSV | 85.28% | +4.29 pp | 8 | 1 | 1,809 |
+| HumanEval | VVS | 84.66% | +3.68 pp | 10 | 4 | 2,853 |
+| HumanEval | VSV | 85.89% | +4.91 pp | 11 | 3 | 3,142 |
+| HumanEval | SVV | 86.50% | +5.52 pp | 12 | 3 | 3,173 |
+| HumanEval | **VVV** | **87.73%** | **+6.75 pp** | 13 | 2 | 4,461 |
+| LiveCodeBench | SSS | 19.30% | +0.00 pp | 0 | 0 | 0 |
+| LiveCodeBench | VSS | 19.30% | +0.00 pp | 3 | 3 | 1,951 |
+| LiveCodeBench | SVS | 23.39% | +4.09 pp | 8 | 1 | 2,158 |
+| LiveCodeBench | SSV | 22.81% | +3.51 pp | 6 | 0 | 2,525 |
+| LiveCodeBench | VVS | 24.56% | +5.26 pp | 11 | 2 | 3,985 |
+| LiveCodeBench | VSV | 22.22% | +2.92 pp | 7 | 2 | 4,467 |
+| LiveCodeBench | **SVV** | **26.32%** | **+7.02 pp** | 12 | 0 | 4,647 |
+| LiveCodeBench | VVV | 25.15% | +5.85 pp | 12 | 2 | 6,501 |
+
+HumanEval đạt fixed-sequence accuracy cao nhất khi verify cả ba checkpoint. Trên
+LiveCodeBench, **SVV** tốt hơn **VVV** dù dùng ít token hơn: việc thêm CP1 verification
+không tạo gain trung bình và có thể làm kết quả xấu đi.
+
+![CBV-Bench accuracy heatmap](../results/cbv_bench_analysis_26102026/figures/accuracy_heatmap.png)
+
+### 26.4. Conditional checkpoint effects
+
+Mỗi conditional contrast chỉ thay đổi một checkpoint và giữ nguyên hai action còn lại.
+Mỗi task đóng góp bốn paired histories cho từng checkpoint.
+
+| Dataset | Checkpoint | Paired edges | Helpful | Harmful | No change | Net effect |
+|---|---:|---:|---:|---:|---:|---:|
+| HumanEval | CP1 Planner | 652 | 18 | 11 | 623 | +1.07 pp |
+| HumanEval | CP2 Coder | 652 | 20 | 7 | 625 | +1.99 pp |
+| HumanEval | CP3 Reviewer | 652 | 26 | 5 | 621 | **+3.22 pp** |
+| LiveCodeBench | CP1 Planner | 684 | 10 | 11 | 663 | **−0.15 pp** |
+| LiveCodeBench | CP2 Coder | 684 | 28 | 1 | 655 | **+3.95 pp** |
+| LiveCodeBench | CP3 Reviewer | 684 | 18 | 1 | 665 | +2.49 pp |
+
+Kết quả cho thấy giá trị checkpoint phụ thuộc dataset. CP3 mạnh nhất trên HumanEval,
+trong khi CP2 mạnh nhất trên LiveCodeBench. CP1 trên LiveCodeBench có net effect âm
+nhẹ. Đây là bằng chứng thực nghiệm cho động cơ downstream-aware routing: số lần verify
+không đủ để quyết định, vị trí và history của verification cũng quan trọng.
+
+### 26.5. Multi-verification và oracle headroom
+
+| Dataset | Best fixed | Accuracy | Offline any-branch oracle | Multi tốt hơn / bằng / kém best Level 1 |
+|---|---|---:|---:|---:|
+| HumanEval | VVV | 87.73% | 90.18% | 1 / 161 / 1 |
+| LiveCodeBench | SVV | 26.32% | 27.49% | 4 / 166 / 1 |
+
+Multi-verification tạo thêm một số rescue cases nhưng phần lớn task có kết quả bằng
+best single-intervention branch. Oracle chỉ là upper bound hậu nghiệm, không phải policy
+có thể triển khai và không chứng minh rằng controller có thể dự đoán đúng nhánh tốt nhất.
+
+### 26.6. Collection cost
+
+| Dataset | Unique Teacher calls đã collect | Unique Teacher tokens |
+|---|---:|---:|
+| HumanEval complete | 1,141 | 1,800,443 |
+| LiveCodeBench partial | 1,211 | 2,806,349 |
+
+Các cột token theo sequence ở mục 26.3 là chi phí triển khai trung bình của trajectory.
+Bảng trên là chi phí collection theo unique shared-prefix edges; hai đại lượng không được
+cộng hoặc so sánh trực tiếp như cùng một metric.
+
+### 26.7. LiveCodeBench failure audit
+
+Bốn lỗi đều là model response không parse được thành JSON và đều có **retryable=true**:
+
+- LiveCodeBench/3754: unterminated string.
+- LiveCodeBench/abc395_e: thiếu delimiter.
+- LiveCodeBench/arc191_d: unterminated string.
+- LiveCodeBench/3777: unterminated string.
+
+Cache tương thích vẫn được giữ. Tuy nhiên, missingness có thể liên quan đến generation
+khó, nên kết quả 171-task chỉ là available-data analysis và chưa được trình bày như
+LiveCodeBench benchmark hoàn chỉnh.
+
+### 26.8. Kết luận tạm thời
+
+1. Level 2 xác nhận verification có lợi trên cả HumanEval và LiveCodeBench.
+2. VVV tốt nhất trên HumanEval nhưng không cost-efficient nhất trên LiveCodeBench.
+3. CP2/CP3 tạo phần lớn gain trên LiveCodeBench; CP1 có conditional net effect gần 0.
+4. Harmful edges vẫn tồn tại, vì vậy Always Verify không phải chiến lược tối ưu chung.
+5. Multi-verification chỉ vượt best Level 1 trên 1 HumanEval task và 4 LiveCodeBench tasks.
+6. Cần phục hồi bốn LiveCodeBench task trước khi chốt số cuối và trước khi bắt đầu
+   BigCodeBench trong overnight pipeline.
+
+Artifacts:
+
+- [CBV Level 2 available-data report](../results/cbv_bench_analysis_26102026/CBV_Level2_available_data_report.md)
+- [Sequence metrics](../results/cbv_bench_analysis_26102026/sequence_metrics.csv)
+- [Checkpoint effects](../results/cbv_bench_analysis_26102026/checkpoint_effects.csv)
+- [Task outcomes](../results/cbv_bench_analysis_26102026/task_outcomes.csv)
+- [Case studies](../results/cbv_bench_analysis_26102026/case_studies.csv)
+- [Machine-readable summary](../results/cbv_bench_analysis_26102026/summary.json)
+- [Analysis script](../scripts/analyze_cbv_level2_available.py)
+
+Reproduction (offline analysis only):
+
+```bash
+cd /home/llm/hainn/hainn/agent_verification_budget
+conda activate agent_verify
+python scripts/analyze_cbv_level2_available.py \
+  --humaneval-dir results/cbv_bench_v2_26102026 \
+  --livecodebench-dir results/cbv_bench_v2_livecodebench_26102026 \
+  --output-dir results/cbv_bench_analysis_26102026
+```
+
+## 27. Cập nhật cuối — CBV-Bench sau BigCodeBench recovery
+
+Mục này thay thế trạng thái tạm thời ở phần 26 đối với BigCodeBench. Collection
+BigCodeBench đã hoàn thành sau khi audit và thay thế các task lỗi hạ tầng bằng selection
+recovery có provenance. Phân tích dưới đây không chạy thêm inference và dùng paired
+task-rollouts khi so sánh các verification sequence.
+
+![CBV-Bench all-dataset dashboard](../results/cbv_bench_all_26102026/figures/cbv_bench_dashboard.png)
+
+| Collection | Validation | Complete tasks | Trajectories | Teacher calls | Teacher tokens |
+|---|---:|---:|---:|---:|---:|
+| HumanEval L2 | Valid | 163/163 | 1,304/1,304 | 1,141 | 1,800,443 |
+| LiveCodeBench L2 | **Partial** | 171/175 | 1,380/1,400 | 1,211 | 2,806,349 |
+| BigCodeBench L1 | Valid | 200/200 | 800/800 | 600 | 978,419 |
+| BigCodeBench L2 | Valid | 25/25 | 200/200 | 175 | 322,034 |
+
+Tổng cộng có **538 unique selected task IDs**, **3,684/3,704 trajectories** và
+**5,907,245 Teacher tokens**. LiveCodeBench vẫn thiếu 20 trajectories trên bốn task;
+do đó toàn bộ collection chưa thể gọi là 100% full-valid, dù ba collection còn lại đã
+hoàn chỉnh.
+
+| Collection | Paired n | SSS | Best single verify | Best observed sequence |
+|---|---:|---:|---:|---:|
+| HumanEval L2 | 163 | 80.98% | SSV: 85.28% (+4.29 pp) | VVV: 87.73% (+6.75 pp) |
+| LiveCodeBench L2 | 171 | 19.30% | SVS: 23.39% (+4.09 pp) | SVV: 26.32% (+7.02 pp) |
+| BigCodeBench L1 | 200 | 31.50% | SVS: 35.50% (+4.00 pp) | SVS: 35.50% (+4.00 pp) |
+| BigCodeBench L2 | 25 | 32.00% | VSS: 44.00% (+12.00 pp) | VVS: 48.00% (+16.00 pp) |
+
+Kết quả chính:
+
+1. Checkpoint tốt nhất thay đổi theo dataset: CP3 trên HumanEval, CP2 trên
+   LiveCodeBench/BigCodeBench L1 và CP1 trên BigCodeBench L2 pilot.
+2. Trên 359 task Level 2 hoàn chỉnh, multi-verification chỉ tốt hơn best single ở
+   5 task, kém hơn ở 2 task và bằng nhau ở 352 task.
+3. BigCodeBench L2 chỉ có 25 task nên mức gain +16 pp là pilot estimate, chưa phải
+   kết luận ổn định.
+4. Khi training combined phải lọc complete counterfactual groups và group split theo
+   `task_id`; BigCodeBench L2 là subset của BigCodeBench L1 nên không được coi là độc lập.
+
+Artifacts tổng hợp:
+
+- [Full cross-dataset report](../results/cbv_bench_all_26102026/CBV_Bench_all_report.md)
+- [Collection summary](../results/cbv_bench_all_26102026/collection_summary.csv)
+- [Paired sequence accuracy](../results/cbv_bench_all_26102026/sequence_accuracy_paired.csv)
+- [Checkpoint effects](../results/cbv_bench_all_26102026/checkpoint_effects.csv)
+- [Machine-readable summary](../results/cbv_bench_all_26102026/summary.json)
+- [Reproduction script](../scripts/report_cbv_bench_all.py)

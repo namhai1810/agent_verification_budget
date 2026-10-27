@@ -9,6 +9,10 @@ TEACHER_PORT="${TEACHER_PORT:-8012}"
 CHILD_MODEL="${CHILD_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct-AWQ}"
 TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
+CHILD_MEMORY_FRACTION="${CHILD_MEMORY_FRACTION:-0.23}"
+TEACHER_MEMORY_FRACTION="${TEACHER_MEMORY_FRACTION:-0.62}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
+MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
 
 mkdir -p "${STATE_DIR}"
 
@@ -50,8 +54,8 @@ start_server() {
     --host 127.0.0.1 \
     --port "${port}" \
     --gpu-memory-utilization "${memory_fraction}" \
-    --max-model-len 4096 \
-    --max-num-seqs 1 \
+    --max-model-len "${MAX_MODEL_LEN}" \
+    --max-num-seqs "${MAX_NUM_SEQS}" \
     --enforce-eager \
     >"${log_file}" 2>&1 &
   local pid=$!
@@ -115,8 +119,8 @@ case "${action}" in
       echo "Run: bash scripts/start_vllm_gpu2.sh status" >&2
       exit 1
     fi
-    start_server child "${CHILD_MODEL}" "${CHILD_PORT}" 0.23
-    start_server teacher "${TEACHER_MODEL}" "${TEACHER_PORT}" 0.68
+    start_server child "${CHILD_MODEL}" "${CHILD_PORT}" "${CHILD_MEMORY_FRACTION}"
+    start_server teacher "${TEACHER_MODEL}" "${TEACHER_PORT}" "${TEACHER_MEMORY_FRACTION}"
     echo "Both loaders were launched on physical GPU ${GPU_ID}. Model loading can take several minutes."
     echo "Monitor with: bash scripts/start_vllm_gpu2.sh logs"
     ;;

@@ -1,0 +1,34 @@
+_base_: cbv_bench_v2.yaml
+
+collection:
+  name: cbv_bench_v2_bigcodebench_qwen25_gpu2
+  results_dir: results/cbv_bench_v2_bigcodebench
+
+datasets:
+  - name: bigcodebench
+    enabled: true
+    version: v0.1.4
+    revision: b74c0d0bf70d2c0bc459be537895cca163007f1a
+    split: v0.1.4
+    selection_manifest: results/cbv_bench_v2_bigcodebench/selections/new_pilot150.json
+    task_count: 150
+    task_offset: 0
+
+models:
+  planner:
+    prompt_version: planner-v1-bigcodebench
+  coder:
+    prompt_version: coder-v1-bigcodebench-complete-source
+    max_output_tokens: 3000
+  reviewer:
+    prompt_version: reviewer-v1-bigcodebench-complete-source
+    max_output_tokens: 3000
+  teacher:
+    prompt_version: teacher-v2-bigcodebench-downstream-aware
+    max_output_tokens: 3000
+
+evaluation:
+  sandbox: landlock_seccomp
+  timeout_seconds: 12
+  memory_mb: 2048
+  max_processes: 1

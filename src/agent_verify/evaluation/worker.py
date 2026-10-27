@@ -8,11 +8,14 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import errno
+import io
 import json
 import os
 import socket
 import sys
+import threading
 import time
+import unittest
 from pathlib import Path
 
 # The soname fallback avoids a subprocess-based ldconfig lookup after resource limits.
@@ -27,8 +30,17 @@ class LandlockPathBeneathAttr(ctypes.Structure):
     _fields_ = [("allowed_access", ctypes.c_uint64), ("parent_fd", ctypes.c_int)]
 
 
-def restrict_filesystem() -> None:
-    """Allow only read/execute under system and active Python runtime directories."""
+class SeccompArgCompare(ctypes.Structure):
+    _fields_ = [
+        ("arg", ctypes.c_uint),
+        ("op", ctypes.c_uint),
+        ("datum_a", ctypes.c_uint64),
+        ("datum_b", ctypes.c_uint64),
+    ]
+
+
+def restrict_filesystem(writable_root: Path | None = None) -> None:
+    """Allow runtime reads and, optionally, writes inside one private scratch directory."""
     libc = ctypes.CDLL(None, use_errno=True)
     create_ruleset, add_rule, restrict_self = (444, 445, 446)
     abi = libc.syscall(create_ruleset, 0, 0, 1)
@@ -71,6 +83,23 @@ def restrict_filesystem() -> None:
                     raise RuntimeError(f"landlock_add_rule failed for {path} (errno={ctypes.get_errno()})")
             finally:
                 os.close(path_fd)
+        if writable_root is not None:
+            # Generated programs may legitimately create plots or temporary files. Grant all
+            # handled filesystem operations except execution, but only below the per-evaluation
+            # directory created by the trusted parent process.
+            scratch_fd = os.open(writable_root, os.O_PATH | os.O_CLOEXEC)
+            try:
+                scratch_rule = LandlockPathBeneathAttr(
+                    allowed_access=handled & ~execute,
+                    parent_fd=scratch_fd,
+                )
+                if libc.syscall(add_rule, ruleset_fd, 1, ctypes.byref(scratch_rule), 0) != 0:
+                    raise RuntimeError(
+                        "landlock_add_rule failed for evaluation scratch directory "
+                        f"(errno={ctypes.get_errno()})"
+                    )
+            finally:
+                os.close(scratch_fd)
         if libc.prctl(38, 1, 0, 0, 0) != 0:
             raise RuntimeError(f"prctl(NO_NEW_PRIVS) failed (errno={ctypes.get_errno()})")
         if libc.syscall(restrict_self, ruleset_fd, 0) != 0:
@@ -95,12 +124,21 @@ def restrict_syscalls() -> None:
         ctypes.c_uint,
     ]
     library.seccomp_rule_add.restype = ctypes.c_int
+    library.seccomp_rule_add_array.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_int,
+        ctypes.c_uint,
+        ctypes.POINTER(SeccompArgCompare),
+    ]
+    library.seccomp_rule_add_array.restype = ctypes.c_int
     library.seccomp_load.argtypes = [ctypes.c_void_p]
     library.seccomp_load.restype = ctypes.c_int
     library.seccomp_release.argtypes = [ctypes.c_void_p]
 
     allow = 0x7FFF0000
     deny_eperm = 0x00050000 | errno.EPERM
+    deny_enosys = 0x00050000 | errno.ENOSYS
     context = library.seccomp_init(allow)
     if not context:
         raise RuntimeError("seccomp_init failed")
@@ -123,8 +161,6 @@ def restrict_syscalls() -> None:
         "setsockopt",
         "getsockopt",
         "shutdown",
-        "clone",
-        "clone3",
         "fork",
         "vfork",
         "execve",
@@ -148,6 +184,37 @@ def restrict_syscalls() -> None:
             syscall = library.seccomp_syscall_resolve_name(name.encode())
             if syscall >= 0 and library.seccomp_rule_add(context, deny_eperm, syscall, 0) != 0:
                 raise RuntimeError(f"Could not block syscall: {name}")
+        # Returning ENOSYS for clone3 makes libc fall back to legacy clone, where the
+        # CLONE_THREAD flag can be filtered safely. EPERM would make pthread creation fail early.
+        clone3_syscall = library.seccomp_syscall_resolve_name(b"clone3")
+        if (
+            clone3_syscall >= 0
+            and library.seccomp_rule_add(context, deny_enosys, clone3_syscall, 0) != 0
+        ):
+            raise RuntimeError("Could not restrict clone3 syscall")
+        # pthreads use clone with CLONE_THREAD. Libraries such as matplotlib may need a small
+        # internal thread pool, while arbitrary child processes must remain forbidden.
+        clone_syscall = library.seccomp_syscall_resolve_name(b"clone")
+        if clone_syscall >= 0:
+            clone_thread = 0x00010000
+            masked_equal = 7
+            comparison = SeccompArgCompare(
+                arg=0,
+                op=masked_equal,
+                datum_a=clone_thread,
+                datum_b=0,
+            )
+            if (
+                library.seccomp_rule_add_array(
+                    context,
+                    deny_eperm,
+                    clone_syscall,
+                    1,
+                    ctypes.byref(comparison),
+                )
+                != 0
+            ):
+                raise RuntimeError("Could not restrict process-form clone syscall")
         if library.seccomp_load(context) != 0:
             raise RuntimeError("seccomp_load failed")
     finally:
@@ -182,6 +249,15 @@ def probe_isolation() -> int:
         checks["process_creation_blocked"] = True
     else:
         checks["process_creation_blocked"] = False
+    thread_completed = []
+    thread = threading.Thread(target=lambda: thread_completed.append(True))
+    try:
+        thread.start()
+        thread.join(timeout=1)
+    except RuntimeError:
+        checks["thread_creation_allowed"] = False
+    else:
+        checks["thread_creation_allowed"] = thread_completed == [True]
     checks["isolation_ok"] = all(checks.values())
     print(json.dumps(checks, sort_keys=True), flush=True)
     return 0 if checks["isolation_ok"] else 1
@@ -210,6 +286,34 @@ def _livecodebench_result(run_test, payload: dict) -> dict:
     return {"passed": False, "status": status, "official_metadata": metadata}
 
 
+def _bigcodebench_result(payload: dict) -> dict:
+    """Execute BigCodeBench task tests without exposing them to orchestration or models."""
+
+    namespace: dict = {}
+    # Agents emit complete source. code_prompt is retained only as evaluator provenance;
+    # prepending it could duplicate a function signature and change the submitted program.
+    source = str(payload["code"]) + "\n" + str(payload["test"])
+    exec(compile(source, "<isolated-bigcodebench>", "exec"), namespace, namespace)
+    suite = unittest.TestSuite()
+    for value in namespace.values():
+        if isinstance(value, type) and issubclass(value, unittest.TestCase):
+            suite.addTests(unittest.defaultTestLoader.loadTestsFromTestCase(value))
+    count = suite.countTestCases()
+    if count == 0:
+        return {"passed": False, "status": "EVALUATOR_ERROR:no_unittest_cases"}
+    stream = io.StringIO()
+    outcome = unittest.TextTestRunner(stream=stream, verbosity=0).run(suite)
+    if outcome.wasSuccessful():
+        return {"passed": True, "status": "PASS", "test_count": count}
+    return {
+        "passed": False,
+        "status": "FAIL",
+        "test_count": count,
+        "failures": len(outcome.failures),
+        "errors": len(outcome.errors),
+    }
+
+
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--probe-isolation":
         return probe_isolation()
@@ -220,14 +324,20 @@ def main() -> int:
             payload = json.load(handle)
         mode = str(payload.get("mode", "humaneval"))
         run_test = None
+        writable_root = None
         if mode == "livecodebench":
             # Import trusted upstream code before Landlock removes repository access.
             sys.path.insert(0, str(Path(payload["official_repo"]).resolve()))
             from lcb_runner.evaluation.testing_util import run_test as official_run_test
 
             run_test = official_run_test
+        elif mode == "bigcodebench":
+            writable_root = Path(str(payload["sandbox_work_dir"])).resolve(strict=True)
+            if not writable_root.is_dir() or writable_root.is_symlink():
+                raise RuntimeError("Invalid BigCodeBench sandbox_work_dir")
+            os.chdir(writable_root)
         try:
-            restrict_filesystem()
+            restrict_filesystem(writable_root=writable_root)
             restrict_syscalls()
         except Exception as exc:
             result = {
@@ -242,14 +352,18 @@ def main() -> int:
             if run_test is None:
                 raise RuntimeError("Official LiveCodeBench evaluator was not loaded")
             result = _livecodebench_result(run_test, payload)
+        elif mode == "bigcodebench":
+            result = _bigcodebench_result(payload)
         else:
             namespace: dict = {}
             source = payload["code"] + "\n" + payload["test"] + "\ncheck(" + payload["entry_point"] + ")\n"
             exec(compile(source, "<isolated-humaneval>", "exec"), namespace, namespace)
             result = {"passed": True, "status": "passed"}
     except BaseException as exc:  # The sandbox must contain arbitrary generated code.
-        prefix = "EVALUATOR_ERROR" if mode == "livecodebench" else "failed"
+        prefix = "EVALUATOR_ERROR" if mode in {"livecodebench", "bigcodebench"} else "failed"
         result = {"passed": False, "status": f"{prefix}:{type(exc).__name__}"}
+        if os.environ.get("AGENT_VERIFY_EVALUATOR_DEBUG") == "1":
+            result["debug_error"] = repr(exc)[-1000:]
     result["worker_seconds"] = time.perf_counter() - started
     print(json.dumps(result, sort_keys=True), flush=True)
     return 0

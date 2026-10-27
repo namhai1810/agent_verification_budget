@@ -1,0 +1,163 @@
+schema_version: cbv-bench-config-v2
+
+collection:
+  name: cbv_bench_v2_qwen25_gpu2
+  level: 2
+  results_dir: results/cbv_bench_v2
+  rollout_seed: 20261026
+  repeated_rollouts: 1
+  batch_size: 1
+  resume: true
+  retry_failed: false
+  reuse_legacy_level1: true
+  max_teacher_calls: null
+  max_teacher_tokens: null
+  teacher_prompt_token_safety_factor: 1.25
+  export_parquet: true
+  progress: true
+
+selection:
+  seed: 42
+  split_seed: 20261026
+  train_fraction: 0.70
+  validation_fraction: 0.15
+  test_fraction: 0.15
+  # Add JSON/JSONL files containing every task used during development.
+  exploratory_task_files: []
+
+datasets:
+  - name: humaneval
+    enabled: true
+    version: b9453e8f1865df0a0057a1383767caa400acfbcf
+    revision: b9453e8f1865df0a0057a1383767caa400acfbcf
+    split: test
+    data_path: data/HumanEval.jsonl.gz
+    sha256: b796127e635a67f93fb35c04f4cb03cf06f38c8072ee7cee8833d7bee06979ef
+    selection_manifest: results/cbv_bench_v2/selections/humaneval_pilot15.json
+    existing_results_dir: results
+    task_count: 15
+    task_offset: 0
+
+  - name: livecodebench
+    enabled: false
+    version: v6
+    revision: 175d0ac20500fd7aa0813f7a2e6ae7ecad3c76c9
+    config_name: v6
+    split: test
+    selection_manifest: results/cbv_bench_v2/selections/livecodebench_pilot15.json
+    existing_results_dir: results/livecodebench
+    task_count: 15
+    task_offset: 0
+    minimum_release_date: "2025-01-01"
+    difficulties: [easy, medium, hard]
+    official_evaluator_path: .vendor/LiveCodeBench
+    official_evaluator_commit: 28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24
+
+  - name: bigcodebench
+    enabled: false
+    version: v0.1.4
+    revision: b74c0d0bf70d2c0bc459be537895cca163007f1a
+    split: v0.1.4
+    selection_manifest: results/cbv_bench_v2/selections/bigcodebench_pilot15.json
+    task_count: 15
+    task_offset: 0
+
+model_pair:
+  pair_id: qwen25-coder-7b-awq__qwen25-coder-32b-awq
+  student_model:
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    family: qwen2.5-coder
+    revision: ""
+    quantization: AWQ
+    parameter_count_b: 7
+    metadata:
+      role: student
+  teacher_model:
+    model_id: Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+    family: qwen2.5-coder
+    revision: ""
+    quantization: AWQ
+    parameter_count_b: 32
+    metadata:
+      role: teacher
+  tags: [qwen2.5, coder, awq, local-vllm]
+  metadata:
+    research_axis: downstream_aware_verification
+    intended_use: cbv_bench_collection
+
+models:
+  planner:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    base_url: http://127.0.0.1:8011/v1
+    api_key_env: VLLM_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 900
+    seed: 101
+    prompt_version: planner-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+  coder:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    base_url: http://127.0.0.1:8011/v1
+    api_key_env: VLLM_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 1600
+    seed: 102
+    prompt_version: coder-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+  reviewer:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-7B-Instruct-AWQ
+    base_url: http://127.0.0.1:8011/v1
+    api_key_env: VLLM_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 1500
+    seed: 103
+    prompt_version: reviewer-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+  teacher:
+    provider: openai_compatible
+    model_id: Qwen/Qwen2.5-Coder-32B-Instruct-AWQ
+    base_url: http://127.0.0.1:8012/v1
+    api_key_env: VLLM_API_KEY
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 1800
+    seed: 201
+    prompt_version: teacher-v2-downstream-aware
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+  critic:
+    provider: heuristic
+    model_id: deterministic-local-critic-v1
+    temperature: 0.0
+    top_p: 1.0
+    max_output_tokens: 300
+    seed: 301
+    prompt_version: critic-v1
+    input_cost_per_million: 0.0
+    output_cost_per_million: 0.0
+
+provider:
+  base_url: http://127.0.0.1:8011/v1
+  api_key_env: VLLM_API_KEY
+  timeout_seconds: 300
+  max_retries: 1
+  response_format: json_schema
+
+budget:
+  max_spend_usd: 0.0
+  allow_paid_calls: true
+
+evaluation:
+  sandbox: landlock_seccomp
+  timeout_seconds: 8
+  memory_mb: 1024
+  max_processes: 1

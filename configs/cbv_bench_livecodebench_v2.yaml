@@ -1,0 +1,41 @@
+_base_: cbv_bench_v2.yaml
+
+collection:
+  name: cbv_bench_v2_livecodebench_qwen25_gpu2
+  results_dir: results/cbv_bench_v2_livecodebench
+
+datasets:
+  - name: livecodebench
+    enabled: true
+    version: v6
+    revision: 175d0ac20500fd7aa0813f7a2e6ae7ecad3c76c9
+    config_name: v6
+    split: test
+    selection_manifest: results/cbv_bench_v2_livecodebench/selections/existing_pilot15.json
+    existing_results_dir: null
+    existing_results_dirs:
+      - results/livecodebench
+      - results/livecodebench_hard_extension
+    task_count: 15
+    task_offset: 0
+    minimum_release_date: "2025-01-01"
+    difficulties: [easy, medium, hard]
+    difficulty_weights:
+      easy: 0.4
+      medium: 0.4
+      hard: 0.2
+    official_evaluator_path: .vendor/LiveCodeBench
+    official_evaluator_commit: 28fef95ea8c9f7a547c8329f2cd3d32b92c1fa24
+
+models:
+  planner:
+    prompt_version: planner-v2-livecodebench
+  coder:
+    prompt_version: coder-v2-livecodebench-io-aware
+    max_output_tokens: 3000
+  reviewer:
+    prompt_version: reviewer-v2-livecodebench-io-aware
+    max_output_tokens: 3000
+  teacher:
+    prompt_version: teacher-v3-livecodebench-downstream-aware
+    max_output_tokens: 3000

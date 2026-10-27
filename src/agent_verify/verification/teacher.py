@@ -72,6 +72,11 @@ def submission_contract(task: PublicTask) -> str:
             "This is a LiveCodeBench functional submission. Preserve the required function/class and "
             "starter-code interface. Hidden tests are unavailable."
         )
+    if getattr(task, "benchmark", "humaneval") == "bigcodebench":
+        return (
+            "This is a BigCodeBench function submission. Preserve the public entry point and "
+            "library contract. Hidden tests and the canonical solution are unavailable."
+        )
     return "This is a HumanEval function submission. Preserve the required entry point and signature."
 
 
