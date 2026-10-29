@@ -82,6 +82,9 @@ def _network_class() -> Any:
                 raise ValueError(f"Unknown downstream mode: {downstream_mode}")
             hidden = int(params.get("hidden_dim", 128))
             dropout = float(params.get("dropout", 0.15))
+            self.head_mode = str(params.get("head_mode", "flat"))
+            if self.head_mode not in {"flat", "hierarchical"}:
+                raise ValueError(f"Unknown DARC outcome head: {self.head_mode}")
             self.downstream_mode = downstream_mode
             self.segment_projections = nn.ModuleList(
                 [
@@ -122,7 +125,13 @@ def _network_class() -> Any:
                 nn.Linear(hidden, hidden // 2),
                 nn.GELU(),
             )
-            self.value_head = nn.Linear(hidden // 2, 3)
+            if self.head_mode == "flat":
+                self.value_head = nn.Linear(hidden // 2, 3)
+            else:
+                # Factor P(outcome) into P(Change) and P(Helpful | Change).
+                # The second logit is supervised only on observed changed pairs.
+                self.change_head = nn.Linear(hidden // 2, 1)
+                self.direction_head = nn.Linear(hidden // 2, 1)
             self.cost_head = nn.Linear(hidden // 2, 2)
 
         def forward(self, batch: dict[str, Any]) -> tuple[Any, Any]:
@@ -151,7 +160,13 @@ def _network_class() -> Any:
                 gate = torch.sigmoid(self.context_gate(torch.cat((state, context), dim=1)))
                 state = self.context_norm(state + gate * context)
             hidden = self.trunk(state)
-            return self.value_head(hidden), self.cost_head(hidden)
+            if self.head_mode == "flat":
+                outcome = self.value_head(hidden)
+            else:
+                outcome = torch.cat(
+                    (self.change_head(hidden), self.direction_head(hidden)), dim=1
+                )
+            return outcome, self.cost_head(hidden)
 
     return DARCNetwork
 
@@ -185,6 +200,23 @@ def _effective_class_weights(labels: np.ndarray, beta: float) -> np.ndarray:
     return weights
 
 
+def _effective_binary_weights(labels: np.ndarray, beta: float) -> np.ndarray:
+    if len(labels) == 0:
+        return np.ones(2, dtype=float)
+    counts = np.bincount(labels.astype(int), minlength=2).astype(float)
+    effective = 1.0 - np.power(beta, counts)
+    weights = np.divide(
+        1.0 - beta,
+        effective,
+        out=np.zeros_like(effective),
+        where=effective > 0,
+    )
+    positive = weights > 0
+    normalizer = float(weights[positive].mean()) if np.any(positive) else 1.0
+    weights = weights / max(normalizer, 1e-9)
+    return weights
+
+
 def _classification_loss(logits: Any, labels: Any, mode: str, weights: Any, gamma: float) -> Any:
     torch = _torch()
     if mode == "natural_ce":
@@ -196,6 +228,88 @@ def _classification_loss(logits: Any, labels: Any, mode: str, weights: Any, gamm
         probability = torch.softmax(logits, dim=1).gather(1, labels[:, None]).squeeze(1)
         return (((1.0 - probability).clamp_min(0.0) ** gamma) * per_row).mean()
     raise ValueError(f"Unknown DARC value loss: {mode}")
+
+
+def _binary_loss(
+    logits: Any,
+    targets: Any,
+    mode: str,
+    weights: Any,
+    gamma: float,
+) -> Any:
+    """Binary natural/balanced/focal loss with explicit per-class weights."""
+
+    torch = _torch()
+    targets = targets.to(dtype=logits.dtype)
+    per_row = torch.nn.functional.binary_cross_entropy_with_logits(
+        logits, targets, reduction="none"
+    )
+    if mode == "natural_ce":
+        return per_row.mean()
+    class_weight = weights[targets.to(dtype=torch.long)]
+    if mode == "balanced_ce":
+        return (per_row * class_weight).mean()
+    if mode == "focal":
+        probability = torch.sigmoid(logits)
+        probability_target = torch.where(targets > 0.5, probability, 1.0 - probability)
+        focal = (1.0 - probability_target).clamp_min(0.0) ** gamma
+        return (per_row * class_weight * focal).mean()
+    raise ValueError(f"Unknown DARC hierarchical loss: {mode}")
+
+
+def _outcome_probabilities(logits: Any, *, head_mode: str, temperature: float) -> Any:
+    """Return [Harmful, No-change, Helpful] probabilities for either head."""
+
+    torch = _torch()
+    scaled = logits / max(float(temperature), 1e-6)
+    if head_mode == "flat":
+        return torch.softmax(scaled, dim=1)
+    if head_mode != "hierarchical":
+        raise ValueError(f"Unknown DARC outcome head: {head_mode}")
+    probability_change = torch.sigmoid(scaled[:, 0])
+    helpful_given_change = torch.sigmoid(scaled[:, 1])
+    harmful = probability_change * (1.0 - helpful_given_change)
+    helpful = probability_change * helpful_given_change
+    no_change = 1.0 - probability_change
+    return torch.stack((harmful, no_change, helpful), dim=1)
+
+
+def _hierarchical_value_loss(
+    logits: Any,
+    labels: Any,
+    *,
+    mode: str,
+    change_weights: Any,
+    direction_weights: Any,
+    gamma: float,
+    change_weight: float,
+    direction_weight: float,
+) -> tuple[Any, Any, Any]:
+    """Loss for P(Change) and P(Helpful | Change).
+
+    Label indices follow [Harmful=0, No-change=1, Helpful=2].  Direction is
+    deliberately undefined and unsupervised for No-change states.
+    """
+
+    torch = _torch()
+    changed = labels != 1
+    change_targets = changed.to(dtype=torch.float32)
+    change_loss = _binary_loss(
+        logits[:, 0], change_targets, mode, change_weights, gamma
+    )
+    if bool(changed.any()):
+        direction_targets = (labels[changed] == 2).to(dtype=torch.float32)
+        direction_loss = _binary_loss(
+            logits[changed, 1],
+            direction_targets,
+            mode,
+            direction_weights,
+            gamma,
+        )
+    else:
+        direction_loss = torch.zeros((), device=logits.device)
+    total = change_weight * change_loss + direction_weight * direction_loss
+    return total, change_loss, direction_loss
 
 
 def _ranking_pairs(examples: list[DARCExample]) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -279,11 +393,16 @@ class DARCEnsemble:
         if device.type == "cuda":
             torch.cuda.synchronize(device)
         started = time.perf_counter()
+        head_mode = str(self.params.get("head_mode", "flat"))
         for member in self.members:
             network = self._network(member, device)
             with torch.inference_mode():
                 logits, cost = network(batch)
-                member_probability = torch.softmax(logits / self.temperature, dim=1)
+                member_probability = _outcome_probabilities(
+                    logits,
+                    head_mode=head_mode,
+                    temperature=self.temperature,
+                )
                 mean_log = cost[:, 0] * member.cost_log_scale + member.cost_log_mean
                 upper_log = cost[:, 1] * member.cost_log_scale + member.cost_log_mean
                 expected = torch.expm1(mean_log).clamp_min(0.0)
@@ -309,7 +428,7 @@ class DARCEnsemble:
         torch = _torch()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "darc-ensemble-v2",
+            "schema_version": "darc-ensemble-v3",
             "embedding_dim": self.embedding_dim,
             "metadata_dim": self.metadata_dim,
             "params": self.params,
@@ -387,6 +506,9 @@ def train_ensemble(
     validation_labels = torch.as_tensor(
         [row.value_label for row in validation_examples], dtype=torch.long, device=device
     )
+    head_mode = str(params.get("head_mode", "flat"))
+    if head_mode not in {"flat", "hierarchical"}:
+        raise ValueError(f"Unknown DARC outcome head: {head_mode}")
     members: list[DARCMember] = []
     ensemble_members = int(params.get("ensemble_members", 3))
     progress = progress or {}
@@ -418,6 +540,22 @@ def train_ensemble(
         cost_target = torch.as_tensor((log_cost_np - cost_mean) / cost_scale, device=device)
         class_weights = torch.as_tensor(
             _effective_class_weights(labels_np, float(params.get("class_weight_beta", 0.999))),
+            dtype=torch.float32,
+            device=device,
+        )
+        change_np = (labels_np != 1).astype(int)
+        direction_np = (labels_np[change_np.astype(bool)] == 2).astype(int)
+        change_weights = torch.as_tensor(
+            _effective_binary_weights(
+                change_np, float(params.get("class_weight_beta", 0.999))
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+        direction_weights = torch.as_tensor(
+            _effective_binary_weights(
+                direction_np, float(params.get("class_weight_beta", 0.999))
+            ),
             dtype=torch.float32,
             device=device,
         )
@@ -454,13 +592,27 @@ def train_ensemble(
         for epoch in epoch_progress:
             network.train()
             logits, cost = network(batch)
-            value_loss = _classification_loss(
-                logits,
-                labels,
-                loss_mode,
-                class_weights,
-                float(params.get("focal_gamma", 2.0)),
-            )
+            change_loss = torch.zeros((), device=device)
+            direction_loss = torch.zeros((), device=device)
+            if head_mode == "flat":
+                value_loss = _classification_loss(
+                    logits,
+                    labels,
+                    loss_mode,
+                    class_weights,
+                    float(params.get("focal_gamma", 2.0)),
+                )
+            else:
+                value_loss, change_loss, direction_loss = _hierarchical_value_loss(
+                    logits,
+                    labels,
+                    mode=loss_mode,
+                    change_weights=change_weights,
+                    direction_weights=direction_weights,
+                    gamma=float(params.get("focal_gamma", 2.0)),
+                    change_weight=float(params.get("change_loss_weight", 1.0)),
+                    direction_weight=float(params.get("direction_loss_weight", 1.0)),
+                )
             mean_loss = torch.nn.functional.smooth_l1_loss(cost[:, 0], cost_target)
             quantile = float(params.get("cost_quantile", 0.90))
             quantile_error = cost_target - cost[:, 1]
@@ -470,7 +622,9 @@ def train_ensemble(
             ).mean()
             ranking_loss = torch.zeros((), device=device)
             if paired_ranking and len(left):
-                probabilities = torch.softmax(logits, dim=1)
+                probabilities = _outcome_probabilities(
+                    logits, head_mode=head_mode, temperature=1.0
+                )
                 advantage = probabilities[:, 2] - probabilities[:, 0]
                 ordered_margin = direction_tensor * (
                     advantage[left_tensor] - advantage[right_tensor]
@@ -493,8 +647,16 @@ def train_ensemble(
             network.eval()
             with torch.inference_mode():
                 val_logits, _val_cost = network(validation_batch)
+                validation_probability = _outcome_probabilities(
+                    val_logits, head_mode=head_mode, temperature=1.0
+                ).clamp_min(1e-9)
                 validation_nll = float(
-                    torch.nn.functional.cross_entropy(val_logits, validation_labels).item()
+                    (-torch.log(
+                        validation_probability[
+                            torch.arange(len(validation_labels), device=device),
+                            validation_labels,
+                        ]
+                    ).mean()).item()
                 )
             if not early_stopping:
                 # Final refits use a fold-selected epoch count.  Keep the last
@@ -522,6 +684,8 @@ def train_ensemble(
                     "epoch": epoch + 1,
                     "total_loss": float(loss.detach().item()),
                     "value_loss": float(value_loss.detach().item()),
+                    "change_loss": float(change_loss.detach().item()),
+                    "direction_loss": float(direction_loss.detach().item()),
                     "cost_mean_loss": float(mean_loss.detach().item()),
                     "cost_quantile_loss": float(quantile_loss.detach().item()),
                     "ranking_loss": float(ranking_loss.detach().item()),
@@ -533,6 +697,8 @@ def train_ensemble(
             epoch_progress.set_postfix(
                 loss=f"{history[-1]['total_loss']:.4f}",
                 cls=f"{history[-1]['value_loss']:.4f}",
+                change=f"{history[-1]['change_loss']:.4f}",
+                direction=f"{history[-1]['direction_loss']:.4f}",
                 cost=f"{history[-1]['cost_mean_loss']:.4f}",
                 qcost=f"{history[-1]['cost_quantile_loss']:.4f}",
                 rank=f"{history[-1]['ranking_loss']:.4f}",

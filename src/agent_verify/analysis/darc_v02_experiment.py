@@ -100,8 +100,17 @@ def _crossfit_candidate(
     epochs: list[int] = []
     rows: list[dict[str, Any]] = []
     folds = grouped_folds(examples, folds=int(config["selection"]["grouped_folds"]), seed=seed)
+    experiment_label = str(
+        config.get("progress", {}).get("experiment_label", "DARC v0.2")
+    )
     for fold_index, (outer_train, outer_validation) in enumerate(
-        tqdm(folds, desc=f"DARC v0.2 OOF {name}", unit="fold", dynamic_ncols=True), 1
+        tqdm(
+            folds,
+            desc=f"{experiment_label} OOF {name}",
+            unit="fold",
+            dynamic_ncols=True,
+        ),
+        1,
     ):
         outer_examples = [examples[int(index)] for index in outer_train]
         inner_train, inner_validation = _inner_split(
@@ -110,6 +119,8 @@ def _crossfit_candidate(
         fit_global = outer_train[inner_train]
         stop_global = outer_train[inner_validation]
         params = dict(config["model"])
+        params["head_mode"] = str(candidate.get("head_mode", "flat"))
+        params.update(dict(candidate.get("model_overrides", {})))
         model = train_ensemble(
             [examples[int(index)] for index in fit_global],
             encoded.subset(fit_global),
@@ -235,6 +246,8 @@ def _train_final(
     path = output / "models" / f"{name}.pt"
     path.parent.mkdir(parents=True, exist_ok=True)
     params = dict(config["model"])
+    params["head_mode"] = str(candidate.get("head_mode", "flat"))
+    params.update(dict(candidate.get("model_overrides", {})))
     params["epochs"] = max(1, int(np.median(best_epochs)))
     params["ensemble_task_fraction"] = 1.0
     model = train_ensemble(

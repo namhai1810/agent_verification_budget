@@ -1771,3 +1771,200 @@ Artifacts tái lập:
 - [Per-task Oracle choices](../results/darc_v02_29102026/data_audit_oracle/tables/test_task_oracle.csv)
 - [Oracle vs DARC table](../results/darc_v02_29102026/data_audit_oracle/tables/oracle_vs_darc.csv)
 - [Reproducible analysis script](../scripts/analyze_darc_data_oracle.py)
+
+## 29. DARC v0.3 — Hierarchical Outcome và Risk-Calibrated Verification
+
+DARC v0.3 được phát triển hoàn toàn trên train/grouped-OOF và **217 validation
+tasks**. Pipeline không load 216 frozen-test tasks, không gọi lại Student/Teacher và
+không sinh lại counterfactual outcomes. Mục tiêu của vòng này là kiểm tra ba đề xuất:
+hierarchical outcome head, imbalance-aware loss và policy kết hợp gain/risk/cost.
+
+> **Kết luận validation:** giữ **flat 3-class head + Focal CE + ensemble 3 model +
+> risk/cost-aware policy** làm development candidate. Hierarchical outcome head bị
+> loại vì không tạo trade-off accuracy–cost tốt hơn. Đây chưa phải confirmatory
+> frozen-test result và chưa đủ để claim superiority.
+
+### 29.1. Thay đổi kiến trúc và decision flow
+
+Các thành phần Frozen UniXcoder, chunked embedding cache, State Fusion, downstream
+attention và hai cost heads được giữ nguyên. Ensemble tăng từ hai lên ba members.
+Các hierarchical ablations factorize outcome như sau:
+
+```text
+P(Change)   = sigmoid(change_logit)
+P(Helpful)  = P(Change) × P(Helpful | Change)
+P(Harmful)  = P(Change) × (1 - P(Helpful | Change))
+P(NoChange) = 1 - P(Change)
+```
+
+Direction loss chỉ được tính trên Helpful/Harmful states; No-change không bị gán một
+direction target giả. Controller mới dùng thông tin có tại checkpoint hiện tại:
+
+```text
+risk_gain     = P(Helpful) - w_h P(Harmful) - beta × ensemble_uncertainty
+value_density = risk_gain / (predicted_cost / reference_cost)^alpha
+verify_utility = value_density - lambda × budget_pressure - checkpoint_margin
+```
+
+Mỗi task vẫn tối đa một Teacher call. Online admission dùng predicted cost và hard
+8,192-token reservation; actual future cost/outcome chỉ dùng để chấm offline replay,
+không được dùng để ra quyết định.
+
+### 29.2. Loss/head ablation
+
+| Candidate | Outcome head | Loss | OOF Helpful AUPRC | OOF Harmful AUPRC | OOF gain r |
+|---|---|---|---:|---:|---:|
+| **Loss-only flat focal** | Flat H/N/D | Focal CE | **0.059** | **0.049** | 0.037 |
+| Hierarchical natural | Change → direction | Natural BCE | 0.056 | 0.017 | **0.041** |
+| Hierarchical balanced | Change → direction | Balanced BCE | 0.049 | 0.029 | 0.007 |
+| Hierarchical focal | Change → direction | Focal BCE | 0.057 | 0.044 | 0.021 |
+
+Train-OOF ban đầu chọn `hierarchical_focal`, nhưng predeclared validation gate yêu
+cầu đồng thời: accuracy không thấp hơn v0.2, actual Teacher tokens thấp hơn v0.2 và
+không tăng Harmful calls. Chỉ `loss_only_flat_focal` qua cả ba điều kiện nên được
+khóa làm DARC v0.3 development candidate trước mọi frozen-test evaluation tương lai.
+
+![DARC v0.3 predictive ablations](../results/darc_v03_30102026/figures/darc_v03_predictive_ablation.png)
+
+Natural hierarchical đạt validation Helpful AUPRC cao nhất `0.077`, nhưng không tạo
+downstream policy tốt nhất. Ngược lại flat focal chỉ đạt `0.051` Helpful AUPRC nhưng
+chọn được policy tốt hơn. Vì positive event rất thưa, một metric predictive đơn lẻ
+không thay thế được end-to-end matched-budget evaluation.
+
+### 29.3. Training dynamics
+
+![DARC v0.3 training diagnostics](../results/darc_v03_30102026/figures/darc_v03_training_diagnostics.png)
+
+Đường là median của ba ensemble members; vùng mờ là member-wise range. Final refit
+dùng số epoch đã chọn từ grouped train-OOF và không early-stop trên validation. Các
+loss giữa flat focal và hierarchical BCE có thang đo khác nhau nên chỉ đọc xu hướng
+hội tụ trong từng curve, không so sánh trực tiếp độ cao giữa các variants. Candidate
+được chọn chạy 99 epochs; objective/NLL tiếp tục giảm đến cuối, vì vậy kết quả hiện
+tại không chứng minh rằng mọi head đã đạt cùng mức tối ưu hóa.
+
+### 29.4. Validation accuracy–cost result
+
+| Policy | Accuracy (95% CI) | Calls | Actual tokens | Helpful | Harmful | No-change | CP1/CP2/CP3 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **DARC v0.3 flat focal** | **42.86% [35.94, 49.31]** | 139 | **244,872** | 9 | **0** | 130 | 0/58/81 |
+| DARC v0.3 hierarchical focal | 42.86% [35.94, 49.31] | 161 | 293,220 | 9 | 0 | 152 | 0/65/96 |
+| DARC v0.2 Full | 41.47% [34.56, 47.93] | 140 | 276,446 | 6 | 0 | 134 | 0/2/138 |
+| Joint MLP + Threshold | 42.40% [35.94, 48.85] | 162 | 250,542 | 9 | 1 | 152 | 107/42/13 |
+| Always CP3 | 41.47% [34.56, 47.93] | 172 | 340,664 | 6 | 0 | 166 | 0/0/172 |
+| Never Verify | 38.71% [32.26, 45.16] | 0 | 0 | 0 | 0 | 0 | 0/0/0 |
+
+![DARC v0.3 validation accuracy-cost](../results/darc_v03_30102026/figures/darc_v03_accuracy_cost.png)
+
+![DARC v0.3 decision efficiency](../results/darc_v03_30102026/figures/darc_v03_decision_efficiency.png)
+
+So với v0.2, candidate mới tăng **+1.39 pp** validation accuracy và giảm **31,574
+tokens (11.4%)**, đồng thời tăng Helpful selections từ 6 lên 9 và vẫn giữ Harmful =
+0. So với Joint MLP, accuracy cao hơn 0.46 pp, dùng ít hơn 5,670 tokens và bỏ harmful
+call duy nhất. Tuy nhiên các 95% CI chồng lấp mạnh; đây là evidence phát triển chứ
+không phải bằng chứng statistically significant về superiority.
+
+Routing bớt lệch CP3: v0.2 chọn CP1/CP2/CP3 = `0/2/138`, còn v0.3 chọn
+`0/58/81`. Dù vậy **130/139 calls (93.5%) vẫn No-change**, nên vấn đề chính vẫn là
+rare-event discrimination chứ không phải thiếu số Teacher calls.
+
+Controller overhead cũng được tách rõ: cold semantic encoding đã ghi nhận khoảng
+22.5 giây cho 651 states (34.6 ms/state), còn warm-cache load khoảng 0.035 giây và
+ba neural heads khoảng 0.020 giây. Các con số compute này được báo cáo riêng, không
+được quy đổi hoặc che bên trong Teacher-token budget.
+
+### 29.5. Đề xuất nào được ủng hộ?
+
+1. **Imbalance-aware focal loss: được ủng hộ ở mức validation.** Flat focal là biến
+   thể duy nhất qua accuracy/cost/risk gate.
+2. **Hierarchical outcome head: bị bác bỏ trong v0.3.** Nó có thể đạt cùng 42.86%
+   nhưng cần thêm 48,348 tokens so với flat focal; balanced/natural còn giảm accuracy.
+3. **Risk/cost-aware decision: có tín hiệu tích cực.** Nó giảm CP3 bias, không chọn
+   harmful intervention và đạt trade-off tốt hơn v0.2 trên validation.
+4. **Predictive value learning vẫn yếu.** Validation Helpful AUPRC chỉ 0.048–0.077,
+   gain Pearson chỉ 0.016–0.027; improvement downstream chưa đồng nghĩa model đã học
+   được counterfactual value mạnh và ổn định.
+5. **Frozen test vẫn bị khóa.** Không được tiếp tục tune trên validation sau khi đã
+   chốt candidate rồi gọi đó là confirmatory. Bước kế tiếp hợp lệ là đăng ký trước
+   evaluation protocol và chỉ chạy frozen test một lần, hoặc tạo external holdout mới.
+
+Artifacts:
+
+- [DARC v0.3 validation report](../results/darc_v03_30102026/report/darc_v03_validation_report.md)
+- [Selection manifest](../results/darc_v03_30102026/selection_manifest.json)
+- [Validation policy table](../results/darc_v03_30102026/tables/validation_policy_results.csv)
+- [Failure metrics](../results/darc_v03_30102026/tables/validation_failure_metrics.csv)
+- [Selected model](../results/darc_v03_30102026/models/darc_v03_selected.pt)
+
+### 29.6. Locked frozen-test evaluation
+
+Sau khi candidate và policy đã được khóa, evaluator riêng chỉ load
+`darc_v03_selected.pt`, calibrator, continuation prior và policy trong selection
+manifest. Không có training, calibration hay policy tuning trên test. Tuy nhiên frozen
+test này đã từng được inspect ở các phase trước, nên đây là **exploratory
+generalization audit**, không phải untouched confirmatory evaluation.
+
+| Policy | Validation accuracy | Frozen-test accuracy (95% CI) | Test gain | Test calls | Test tokens | Test H/D/N | Test CP1/CP2/CP3 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| **DARC v0.3 flat focal** | **42.86%** | 35.65% [29.63, 42.13] | +2.78 pp | 135 | **243,161** | 6/0/129 | 0/42/93 |
+| DARC v0.2 Full | 41.47% | 35.65% [29.17, 42.13] | +2.78 pp | 127 | 254,784 | 6/0/121 | 0/2/125 |
+| Joint MLP + Threshold | 42.40% | 36.11% [30.09, 42.59] | +3.24 pp | 172 | 265,311 | 11/4/157 | 111/52/9 |
+| Always CP3 | 41.47% | **37.50% [31.02, 43.98]** | **+4.63 pp** | 166 | 338,849 | 10/0/156 | 0/0/166 |
+| Never Verify | 38.71% | 32.87% [26.85, 39.35] | 0.00 pp | 0 | 0 | 0/0/0 | 0/0/0 |
+
+![DARC v0.3 validation and frozen-test generalization](../results/darc_v03_30102026/test_evaluation/figures/darc_v03_validation_test_summary.png)
+
+Validation-to-test accuracy của v0.3 giảm **7.21 pp**, từ 42.86% xuống 35.65%.
+Helpful AUPRC gần như không đổi (`0.051 → 0.052`), nhưng gain correlation giảm
+`0.023 → 0.011`; model vẫn chưa ranking intervention value tốt.
+
+#### Paired full-budget comparison
+
+| Comparator | v0.3 difference (95% paired CI) | v0.3 wins/losses/ties | Exact McNemar p | Token difference |
+|---|---:|---:|---:|---:|
+| DARC v0.2 | +0.00 pp [−1.85, +1.85] | 2/2/212 | 1.000 | **−11,623** |
+| Joint MLP | −0.46 pp [−4.17, +2.78] | 7/8/201 | 1.000 | **−22,150** |
+| Always CP3 | −1.85 pp [−3.70, −0.46] | 0/4/212 | 0.125 | **−95,688** |
+| Never Verify | **+2.78 pp [+0.93, +5.09]** | 6/0/210 | 0.031 | +243,161 |
+
+Điểm chính là v0.3 **không tăng test accuracy so với v0.2**, nhưng giữ cùng 35.65%
+với ít hơn 11,623 Teacher tokens, tương đương giảm **4.6%**. So với Never Verify,
+v0.3 cứu sáu task và không phá task nào; exact paired `p=0.031`. Vì test đã từng
+được quan sát, p-value này chỉ mô tả evidence, không biến kết quả thành confirmatory.
+
+Always CP3 có raw test accuracy cao nhất nhưng tốn thêm 95,688 tokens. Tại cap đúng
+bằng 243,161 tokens của v0.3, các discrete operating points không vượt cap là:
+
+| Policy | Best observed accuracy dưới cap | Tokens | Ghi chú |
+|---|---:|---:|---|
+| **DARC v0.3** | **35.65%** | 243,161 | Full locked policy |
+| Joint MLP | 35.19% | 166,419 | 50% grid point |
+| DARC v0.2 | 34.72% | 167,024 | 50% grid point |
+| Always CP3 | 34.72% | 166,061 | 50% grid point |
+
+Không nên diễn giải bảng này thành continuous Pareto superiority: budget grid khá
+thưa và các baseline còn bỏ trống khoảng 76k tokens ở điểm hợp lệ gần nhất. Frontier
+cho thấy Joint/CP3 đạt 36.11% khi chi khoảng 252k tokens, chỉ cao hơn cap v0.3 khoảng
+9k tokens.
+
+![DARC v0.3 frozen-test frontier](../results/darc_v03_30102026/test_evaluation/figures/darc_v03_frozen_test_frontier.png)
+
+#### Kết luận sau frozen test
+
+1. **Risk safety generalize:** v0.3 vẫn có 0 Harmful calls.
+2. **Efficiency cải thiện vừa phải:** cùng accuracy với v0.2 nhưng giảm 4.6% tokens.
+3. **Validation accuracy gain không generalize:** v0.3 không vượt v0.2, Joint hoặc
+   Always CP3 về raw test accuracy.
+4. **Checkpoint diversification chưa tạo thêm Helpful:** chuyển từ gần toàn CP3 sang
+   CP2/CP3 = 42/93 nhưng vẫn chỉ chọn 6 Helpful cases như v0.2.
+5. **Wasted calls vẫn rất cao:** 129/135 = 95.6% selections là No-change; v0.3 chỉ
+   capture 6/19 rescuable frozen-test tasks.
+6. Mọi thay đổi tiếp theo sau khi đọc kết quả này cần external/newly frozen holdout
+   nếu muốn đưa ra paper-level confirmatory claim.
+
+Frozen-test artifacts:
+
+- [Validation + frozen-test report](../results/darc_v03_30102026/test_evaluation/report/darc_v03_validation_frozen_test_report.md)
+- [Evaluation manifest](../results/darc_v03_30102026/test_evaluation/evaluation_manifest.json)
+- [Paired policy comparison](../results/darc_v03_30102026/test_evaluation/tables/paired_policy_comparison.csv)
+- [Budget-matched comparison](../results/darc_v03_30102026/test_evaluation/tables/budget_matched_comparison.csv)
+- [Locked test runner](../scripts/run_darc_v03_locked_test.sh)

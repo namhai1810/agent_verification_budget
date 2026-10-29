@@ -1,0 +1,117 @@
+schema_version: darc-v0.3-config-v1
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  baseline_results: results/cbv_v01_experiments_29102026
+  darc_v02_results: results/darc_v02_29102026
+
+output:
+  root: results/darc_v03_30102026
+
+reproducibility:
+  seed: 20261030
+  deterministic_torch: true
+  bootstrap_repetitions: 5000
+
+progress:
+  experiment_label: DARC v0.3
+  enabled: true
+  mininterval_seconds: 1.0
+  leave_epoch_bars: false
+
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  chunk_stride: 480
+  max_chunks_per_text: 5
+  batch_size: 32
+  device: auto
+  local_files_only: false
+  normalize: true
+  cache_dir: results/darc_v01_29102026/embedding_cache
+
+model:
+  hidden_dim: 128
+  attention_heads: 4
+  dropout: 0.15
+  # v0.2 actually used two members. v0.3 uses the requested three-model ensemble.
+  ensemble_members: 3
+  ensemble_task_fraction: 0.90
+  epochs: 120
+  patience: 16
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  cost_loss_weight: 0.25
+  cost_quantile: 0.90
+  cost_quantile_weight: 0.20
+  ranking_loss_weight: 0.0
+  ranking_margin: 0.10
+  focal_gamma: 2.0
+  class_weight_beta: 0.999
+  change_loss_weight: 1.0
+  direction_loss_weight: 0.75
+  gradient_clip_norm: 5.0
+
+selection:
+  grouped_folds: 3
+  # Among policies within this mean-accuracy tolerance of the OOF maximum,
+  # prefer fewer harmful calls and fewer actual tokens.
+  accuracy_tolerance_pp: 0.20
+
+ablation:
+  - name: loss_only_flat_focal
+    display_name: Loss-only · flat focal
+    category: loss_only
+    head_mode: flat
+    loss_mode: focal
+    paired_ranking: false
+    main_eligible: true
+  - name: hierarchical_natural
+    display_name: Hierarchical head · natural BCE
+    category: hierarchical_head
+    head_mode: hierarchical
+    loss_mode: natural_ce
+    paired_ranking: false
+    main_eligible: true
+  - name: hierarchical_balanced
+    display_name: Combined · hierarchical balanced BCE
+    category: combined
+    head_mode: hierarchical
+    loss_mode: balanced_ce
+    paired_ranking: false
+    main_eligible: true
+  - name: hierarchical_focal
+    display_name: Combined · hierarchical focal BCE
+    category: combined
+    head_mode: hierarchical
+    loss_mode: focal
+    paired_ranking: false
+    main_eligible: true
+
+calibration:
+  ece_bins: 10
+  shrinkage_events: 12.0
+
+continuation:
+  shrinkage_tasks: 20.0
+
+policy_grid:
+  harmful_weight: [1.0, 2.0]
+  uncertainty_beta: [0.0, 0.5, 1.0]
+  cost_exponent: [0.0, 0.5, 1.0]
+  cost_lambda: [0.0, 0.03]
+  minimum_change_probability: [0.0, 0.03]
+  continuation_weight: [0.0, 0.5]
+  checkpoint_margins:
+    - [0.00, 0.00, 0.00]
+    - [0.02, 0.01, 0.00]
+    - [0.04, 0.02, 0.00]
+    - [0.06, 0.02, 0.00]
+  cost_mode: [expected]
+
+evaluation:
+  protocol: A-single-strict
+  max_teacher_calls_per_task: 1
+  hard_call_token_cap: 8192
+  frozen_test_access: forbidden
