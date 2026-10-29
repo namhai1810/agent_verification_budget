@@ -31,6 +31,7 @@ if [[ ! -x "$BCB_PYTHON" ]]; then
   echo "ERROR: Python executable not found for $BCB_ENV: $BCB_PYTHON" >&2
   exit 2
 fi
+conda install --yes --name "$BCB_ENV" --channel conda-forge tesseract
 "$BCB_PYTHON" -m pip install --upgrade pip
 "$BCB_PYTHON" -m pip install --no-cache-dir -r requirements-bigcodebench-eval.txt
 "$BCB_PYTHON" -m pip install --no-deps --editable "$PROJECT_ROOT"
