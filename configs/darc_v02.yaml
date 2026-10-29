@@ -1,0 +1,97 @@
+schema_version: darc-v0.2-config-v1
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  baseline_results: results/cbv_v01_experiments_29102026
+  darc_v01_results: results/darc_v01_29102026
+
+output:
+  root: results/darc_v02_29102026
+
+reproducibility:
+  seed: 20261029
+  deterministic_torch: true
+  bootstrap_repetitions: 5000
+
+progress:
+  enabled: true
+  mininterval_seconds: 1.0
+  leave_epoch_bars: true
+
+# Identical semantic representation to v0.1. The embedding cache is reused;
+# neither the encoder nor downstream-attention architecture is redesigned.
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  chunk_stride: 480
+  max_chunks_per_text: 5
+  batch_size: 32
+  device: auto
+  local_files_only: false
+  normalize: true
+  cache_dir: results/darc_v01_29102026/embedding_cache
+
+model:
+  hidden_dim: 128
+  attention_heads: 4
+  dropout: 0.15
+  ensemble_members: 2
+  ensemble_task_fraction: 0.90
+  epochs: 120
+  patience: 16
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  cost_loss_weight: 0.25
+  cost_quantile: 0.90
+  cost_quantile_weight: 0.20
+  ranking_loss_weight: 0.25
+  ranking_margin: 0.10
+  focal_gamma: 2.0
+  class_weight_beta: 0.999
+  gradient_clip_norm: 5.0
+
+selection:
+  grouped_folds: 3
+
+loss_ablation:
+  - name: focal
+    display_name: Focal CE
+    loss_mode: focal
+    paired_ranking: false
+    main_eligible: true
+  - name: balanced
+    display_name: Balanced CE
+    loss_mode: balanced_ce
+    paired_ranking: false
+    main_eligible: true
+  - name: balanced_ranking_ablation
+    display_name: Balanced CE + Ranking (ablation)
+    loss_mode: balanced_ce
+    paired_ranking: true
+    main_eligible: false
+
+calibration:
+  ece_bins: 10
+  shrinkage_events: 12.0
+
+continuation:
+  shrinkage_tasks: 20.0
+
+policy_grid:
+  harmful_weight: [1.0, 2.0, 3.0]
+  uncertainty_beta: [0.0, 0.5, 1.0]
+  cost_lambda: [0.0, 0.02, 0.05]
+  continuation_weight: [0.0, 0.5, 1.0]
+  checkpoint_margins:
+    - [0.0, 0.0, 0.0]
+    - [0.02, 0.02, 0.02]
+    - [0.02, 0.0, 0.0]
+    - [0.04, 0.01, 0.0]
+    - [0.06, 0.02, 0.0]
+  cost_mode: [expected, upper]
+
+evaluation:
+  protocol: A-single-strict
+  max_teacher_calls_per_task: 1
+  hard_call_token_cap: 8192

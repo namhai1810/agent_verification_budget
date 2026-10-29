@@ -46,6 +46,16 @@ echo "Output: ${OUTPUT_ROOT}" | tee -a "${LOG_PATH}"
 echo "Frozen encoder embeddings are cached; Student/Teacher inference is disabled." | tee -a "${LOG_PATH}"
 echo "Frozen test is loaded only after train/validation selection is persisted." | tee -a "${LOG_PATH}"
 
+echo "[preflight] Running DARC contract regression tests" | tee -a "${LOG_PATH}"
+python -m pytest -q tests/test_darc_contracts.py 2>&1 | tee -a "${LOG_PATH}"
+
+echo "[preflight] Auditing train/validation contracts and semantic coverage" | tee -a "${LOG_PATH}"
+python -u scripts/audit_darc_v01.py \
+  --config "${CONFIG_PATH}" \
+  --project-root "${PROJECT_ROOT}" \
+  --tests-passed \
+  2>&1 | tee -a "${LOG_PATH}"
+
 python -u scripts/run_darc_v01.py \
   --config "${CONFIG_PATH}" \
   --project-root "${PROJECT_ROOT}" \

@@ -50,6 +50,17 @@ def set_determinism(seed: int, deterministic: bool) -> None:
         torch.cuda.manual_seed_all(seed)
     if deterministic:
         torch.use_deterministic_algorithms(True, warn_only=True)
+        # MultiheadAttention may otherwise select memory-efficient SDPA, whose
+        # CUDA backward pass is nondeterministic.  The math kernel is slower but
+        # makes grouped-CV/model-selection reruns reproducible.
+        if torch.cuda.is_available() and hasattr(torch.backends, "cuda"):
+            cuda_backend = torch.backends.cuda
+            if hasattr(cuda_backend, "enable_flash_sdp"):
+                cuda_backend.enable_flash_sdp(False)
+            if hasattr(cuda_backend, "enable_mem_efficient_sdp"):
+                cuda_backend.enable_mem_efficient_sdp(False)
+            if hasattr(cuda_backend, "enable_math_sdp"):
+                cuda_backend.enable_math_sdp(True)
         if hasattr(torch.backends, "cudnn"):
             torch.backends.cudnn.benchmark = False
 
@@ -64,12 +75,14 @@ def _network_class() -> Any:
             embedding_dim: int,
             metadata_dim: int,
             params: dict[str, Any],
-            use_attention: bool,
+            downstream_mode: str,
         ) -> None:
             super().__init__()
+            if downstream_mode not in {"none", "checkpoint_only", "semantic_attention"}:
+                raise ValueError(f"Unknown downstream mode: {downstream_mode}")
             hidden = int(params.get("hidden_dim", 128))
             dropout = float(params.get("dropout", 0.15))
-            self.use_attention = use_attention
+            self.downstream_mode = downstream_mode
             self.segment_projections = nn.ModuleList(
                 [
                     nn.Sequential(
@@ -86,7 +99,7 @@ def _network_class() -> Any:
                 nn.GELU(),
                 nn.Dropout(dropout),
             )
-            if use_attention:
+            if downstream_mode == "semantic_attention":
                 self.downstream_projection = nn.Sequential(
                     nn.Linear(embedding_dim, hidden), nn.LayerNorm(hidden), nn.GELU()
                 )
@@ -96,6 +109,10 @@ def _network_class() -> Any:
                     dropout=dropout,
                     batch_first=True,
                 )
+                self.context_gate = nn.Linear(hidden * 2, hidden)
+                self.context_norm = nn.LayerNorm(hidden)
+            elif downstream_mode == "checkpoint_only":
+                self.checkpoint_embedding = nn.Embedding(3, hidden)
                 self.context_gate = nn.Linear(hidden * 2, hidden)
                 self.context_norm = nn.LayerNorm(hidden)
             self.trunk = nn.Sequential(
@@ -117,7 +134,7 @@ def _network_class() -> Any:
             ]
             projected = [layer(value) for layer, value in zip(self.segment_projections, segments, strict=True)]
             state = self.state_fusion(torch.cat((*projected, batch["metadata"]), dim=1))
-            if self.use_attention:
+            if self.downstream_mode == "semantic_attention":
                 downstream = self.downstream_projection(batch["downstream"])
                 context, _weights = self.downstream_attention(
                     state.unsqueeze(1),
@@ -127,6 +144,10 @@ def _network_class() -> Any:
                     need_weights=False,
                 )
                 context = context.squeeze(1)
+                gate = torch.sigmoid(self.context_gate(torch.cat((state, context), dim=1)))
+                state = self.context_norm(state + gate * context)
+            elif self.downstream_mode == "checkpoint_only":
+                context = self.checkpoint_embedding(batch["checkpoint"])
                 gate = torch.sigmoid(self.context_gate(torch.cat((state, context), dim=1)))
                 state = self.context_norm(state + gate * context)
             hidden = self.trunk(state)
@@ -146,6 +167,7 @@ def _as_tensors(encoded: EncodedDARC, device: Any, mean: np.ndarray, scale: np.n
         "downstream": torch.as_tensor(encoded.downstream, dtype=torch.float32, device=device),
         "downstream_mask": torch.as_tensor(encoded.downstream_mask, dtype=torch.bool, device=device),
         "metadata": torch.as_tensor(metadata, dtype=torch.float32, device=device),
+        "checkpoint": torch.as_tensor(encoded.checkpoint, dtype=torch.long, device=device),
     }
 
 
@@ -210,6 +232,7 @@ class DARCMember:
     validation_nll: float
     cost_log_mean: float
     cost_log_scale: float
+    history: tuple[dict[str, float | int], ...] = ()
 
 
 class DARCEnsemble:
@@ -221,7 +244,7 @@ class DARCEnsemble:
         embedding_dim: int,
         metadata_dim: int,
         params: dict[str, Any],
-        use_attention: bool,
+        downstream_mode: str,
         loss_mode: str,
         members: list[DARCMember],
         metadata_mean: np.ndarray,
@@ -231,7 +254,7 @@ class DARCEnsemble:
         self.embedding_dim = embedding_dim
         self.metadata_dim = metadata_dim
         self.params = dict(params)
-        self.use_attention = use_attention
+        self.downstream_mode = downstream_mode
         self.loss_mode = loss_mode
         self.members = members
         self.metadata_mean = metadata_mean.astype(np.float32)
@@ -240,7 +263,7 @@ class DARCEnsemble:
 
     def _network(self, member: DARCMember, device: Any) -> Any:
         network = _network_class()(
-            self.embedding_dim, self.metadata_dim, self.params, self.use_attention
+            self.embedding_dim, self.metadata_dim, self.params, self.downstream_mode
         ).to(device)
         network.load_state_dict(member.state_dict)
         network.eval()
@@ -286,11 +309,11 @@ class DARCEnsemble:
         torch = _torch()
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
-            "schema_version": "darc-ensemble-v1",
+            "schema_version": "darc-ensemble-v2",
             "embedding_dim": self.embedding_dim,
             "metadata_dim": self.metadata_dim,
             "params": self.params,
-            "use_attention": self.use_attention,
+            "downstream_mode": self.downstream_mode,
             "loss_mode": self.loss_mode,
             "metadata_mean": self.metadata_mean,
             "metadata_scale": self.metadata_scale,
@@ -302,6 +325,7 @@ class DARCEnsemble:
                     "validation_nll": member.validation_nll,
                     "cost_log_mean": member.cost_log_mean,
                     "cost_log_scale": member.cost_log_scale,
+                    "history": list(member.history),
                 }
                 for member in self.members
             ],
@@ -309,15 +333,25 @@ class DARCEnsemble:
         torch.save(payload, path)
 
     @classmethod
-    def load(cls, path: Path) -> "DARCEnsemble":
+    def load(cls, path: Path) -> DARCEnsemble:
         torch = _torch()
         payload = torch.load(path, map_location="cpu", weights_only=False)
-        members = [DARCMember(**row) for row in payload["members"]]
+        members = [
+            DARCMember(
+                state_dict=row["state_dict"],
+                best_epoch=int(row["best_epoch"]),
+                validation_nll=float(row["validation_nll"]),
+                cost_log_mean=float(row["cost_log_mean"]),
+                cost_log_scale=float(row["cost_log_scale"]),
+                history=tuple(row.get("history", ())),
+            )
+            for row in payload["members"]
+        ]
         return cls(
             embedding_dim=int(payload["embedding_dim"]),
             metadata_dim=int(payload["metadata_dim"]),
             params=dict(payload["params"]),
-            use_attention=bool(payload["use_attention"]),
+            downstream_mode=str(payload["downstream_mode"]),
             loss_mode=str(payload["loss_mode"]),
             members=members,
             metadata_mean=np.asarray(payload["metadata_mean"]),
@@ -333,13 +367,15 @@ def train_ensemble(
     validation_encoded: EncodedDARC,
     *,
     params: dict[str, Any],
-    use_attention: bool,
+    downstream_mode: str,
     loss_mode: str,
     paired_ranking: bool,
     seed: int,
     device_name: str,
     deterministic: bool,
     description: str,
+    progress: dict[str, Any] | None = None,
+    early_stopping: bool = True,
 ) -> DARCEnsemble:
     torch = _torch()
     device = select_device(device_name)
@@ -353,12 +389,18 @@ def train_ensemble(
     )
     members: list[DARCMember] = []
     ensemble_members = int(params.get("ensemble_members", 3))
-    for member_index in tqdm(
+    progress = progress or {}
+    progress_enabled = bool(progress.get("enabled", True))
+    progress_mininterval = float(progress.get("mininterval_seconds", 1.0))
+    member_progress = tqdm(
         range(ensemble_members),
         desc=description,
         unit="member",
         dynamic_ncols=True,
-    ):
+        disable=not progress_enabled,
+        mininterval=progress_mininterval,
+    )
+    for member_index in member_progress:
         member_seed = seed + member_index * 1009
         set_determinism(member_seed, deterministic)
         indices = _group_subsample_indices(
@@ -387,7 +429,7 @@ def train_ensemble(
             train_encoded.task.shape[1],
             train_encoded.metadata.shape[1],
             params,
-            use_attention,
+            downstream_mode,
         ).to(device)
         optimizer = torch.optim.AdamW(
             network.parameters(),
@@ -398,12 +440,16 @@ def train_ensemble(
         best_nll = math.inf
         best_epoch = 0
         stale = 0
+        patience = int(params.get("patience", 20))
+        history: list[dict[str, float | int]] = []
         epoch_progress = tqdm(
             range(int(params.get("epochs", 160))),
             desc=f"{description} m{member_index + 1}",
             unit="epoch",
-            leave=False,
+            leave=bool(progress.get("leave_epoch_bars", True)),
             dynamic_ncols=True,
+            disable=not progress_enabled,
+            mininterval=progress_mininterval,
         )
         for epoch in epoch_progress:
             network.train()
@@ -450,8 +496,18 @@ def train_ensemble(
                 validation_nll = float(
                     torch.nn.functional.cross_entropy(val_logits, validation_labels).item()
                 )
-            epoch_progress.set_postfix(nll=f"{validation_nll:.4f}")
-            if validation_nll < best_nll - 1e-5:
+            if not early_stopping:
+                # Final refits use a fold-selected epoch count.  Keep the last
+                # epoch instead of selecting again on the held-out validation
+                # partition (which would leak model-selection information).
+                best_nll = validation_nll
+                best_epoch = epoch + 1
+                best_state = {
+                    name: value.detach().cpu().clone()
+                    for name, value in network.state_dict().items()
+                }
+                stale = 0
+            elif validation_nll < best_nll - 1e-5:
                 best_nll = validation_nll
                 best_epoch = epoch + 1
                 best_state = {
@@ -461,19 +517,55 @@ def train_ensemble(
                 stale = 0
             else:
                 stale += 1
-            if stale >= int(params.get("patience", 20)):
+            history.append(
+                {
+                    "epoch": epoch + 1,
+                    "total_loss": float(loss.detach().item()),
+                    "value_loss": float(value_loss.detach().item()),
+                    "cost_mean_loss": float(mean_loss.detach().item()),
+                    "cost_quantile_loss": float(quantile_loss.detach().item()),
+                    "ranking_loss": float(ranking_loss.detach().item()),
+                    "validation_nll": validation_nll,
+                    "best_validation_nll": best_nll,
+                    "stale_epochs": stale,
+                }
+            )
+            epoch_progress.set_postfix(
+                loss=f"{history[-1]['total_loss']:.4f}",
+                cls=f"{history[-1]['value_loss']:.4f}",
+                cost=f"{history[-1]['cost_mean_loss']:.4f}",
+                qcost=f"{history[-1]['cost_quantile_loss']:.4f}",
+                rank=f"{history[-1]['ranking_loss']:.4f}",
+                val=f"{validation_nll:.4f}",
+                best=f"{best_nll:.4f}",
+                patience=f"{stale}/{patience}",
+            )
+            if early_stopping and stale >= patience:
                 break
         epoch_progress.close()
         if best_state is None:
             raise RuntimeError("DARC early stopping failed to capture a model state")
         members.append(
-            DARCMember(best_state, best_epoch, best_nll, cost_mean, cost_scale)
+            DARCMember(
+                best_state,
+                best_epoch,
+                best_nll,
+                cost_mean,
+                cost_scale,
+                tuple(history),
+            )
         )
+        member_progress.set_postfix(
+            member=f"{member_index + 1}/{ensemble_members}",
+            best_epoch=best_epoch,
+            best_nll=f"{best_nll:.4f}",
+        )
+    member_progress.close()
     return DARCEnsemble(
         embedding_dim=train_encoded.task.shape[1],
         metadata_dim=train_encoded.metadata.shape[1],
         params=params,
-        use_attention=use_attention,
+        downstream_mode=downstream_mode,
         loss_mode=loss_mode,
         members=members,
         metadata_mean=metadata_mean,

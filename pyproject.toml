@@ -28,7 +28,9 @@ dev = [
 ]
 darc = [
   "torch>=2.3,<3",
-  "transformers>=4.45,<6",
+  # v5 removed tokenizer APIs used by the audited chunking path. Keep the
+  # semantic encoder on the stable v4 API until a separate migration audit.
+  "transformers>=4.45,<5",
   "safetensors>=0.4,<1",
 ]
 
@@ -60,3 +62,6 @@ select = ["E", "F", "I", "UP", "B"]
 "src/agent_verify/analysis/darc_data.py" = ["E501"]
 "src/agent_verify/analysis/darc_model.py" = ["E501"]
 "src/agent_verify/analysis/darc_experiment.py" = ["E501"]
+"src/agent_verify/analysis/darc_v02_experiment.py" = ["E501"]
+"src/agent_verify/analysis/darc_v02_test_evaluation.py" = ["E501"]
+"scripts/audit_darc_v01.py" = ["E501"]

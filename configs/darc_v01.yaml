@@ -12,10 +12,21 @@ reproducibility:
   deterministic_torch: true
   bootstrap_repetitions: 5000
 
+progress:
+  enabled: true
+  mininterval_seconds: 1.0
+  # Keep one final line per member so overnight tmux/log output preserves the
+  # loss, validation score, early-stopping state, elapsed time, and ETA.
+  leave_epoch_bars: true
+
 semantic_encoder:
   model_id: microsoft/unixcoder-base
   revision: main
   max_length: 512
+  chunk_stride: 480
+  # Five chunks cover every train/validation field in the pre-training audit;
+  # this adds only six chunks relative to a four-chunk cap.
+  max_chunks_per_text: 5
   batch_size: 32
   device: auto
   local_files_only: false
@@ -41,31 +52,59 @@ model:
   gradient_clip_norm: 5.0
 
 ablations:
-  - name: semantic_no_attention
-    display_name: A1 Semantic encoder
-    downstream_attention: false
+  - name: semantic_no_downstream
+    display_name: A1 Semantic, no downstream
+    downstream_mode: none
     loss_candidates: [natural_ce]
     paired_ranking: false
     calibrate: false
     conservative: false
-  - name: semantic_attention
-    display_name: A2 + downstream attention
-    downstream_attention: true
+  - name: checkpoint_only_control
+    display_name: A2 Checkpoint-only control
+    downstream_mode: checkpoint_only
     loss_candidates: [natural_ce]
     paired_ranking: false
     calibrate: false
     conservative: false
-  - name: counterfactual_advantage
-    display_name: A3 + counterfactual advantage
-    downstream_attention: true
-    loss_candidates: [balanced_ce, focal]
+  - name: semantic_attention_natural
+    display_name: A3 Downstream attention + Natural CE
+    downstream_mode: semantic_attention
+    loss_candidates: [natural_ce]
+    paired_ranking: false
+    calibrate: false
+    conservative: false
+  - name: semantic_attention_balanced
+    display_name: A4 Downstream attention + Balanced CE
+    downstream_mode: semantic_attention
+    loss_candidates: [balanced_ce]
+    paired_ranking: false
+    calibrate: false
+    conservative: false
+  - name: semantic_attention_focal
+    display_name: A5 Downstream attention + Focal CE
+    downstream_mode: semantic_attention
+    loss_candidates: [focal]
+    paired_ranking: false
+    calibrate: false
+    conservative: false
+  - name: semantic_attention_ce_ranking
+    display_name: A6 Natural CE + Ranking
+    downstream_mode: semantic_attention
+    loss_candidates: [natural_ce]
+    paired_ranking: true
+    calibrate: false
+    conservative: false
+  - name: semantic_attention_balanced_ranking
+    display_name: A7 Balanced CE + Ranking
+    downstream_mode: semantic_attention
+    loss_candidates: [balanced_ce]
     paired_ranking: true
     calibrate: false
     conservative: false
   - name: darc_full
-    display_name: A4 DARC full
-    reuse_model_from: counterfactual_advantage
-    downstream_attention: true
+    display_name: DARC Full
+    reuse_model_from: semantic_attention_balanced_ranking
+    downstream_mode: semantic_attention
     paired_ranking: true
     calibrate: true
     conservative: true
@@ -75,12 +114,17 @@ calibration:
   uncertainty_beta_grid: [0.0, 0.5, 1.0, 1.5, 2.0]
   margin_grid: [0.0, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20]
   cost_admission_grid: [expected, upper]
+  score_mode_grid: [advantage, advantage_per_1k]
   budget_fractions: [0.0, 0.25, 0.50, 0.75, 1.0]
   ece_bins: 10
 
 evaluation:
   protocol: A-single
   max_teacher_calls_per_task: 1
+  darc_budget_accounting: hard_cap
+  # Conservative provider-total reservation (input + output). This must remain
+  # at least as large as the serving stack's enforced total-token ceiling.
+  hard_call_token_cap: 8192
   train_mode: combined
   scopes: [combined, humaneval, livecodebench, bigcodebench]
   baseline_policies:

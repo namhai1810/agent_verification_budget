@@ -1468,24 +1468,306 @@ cung cấp **paired counterfactual trajectories + measured Teacher cost + multi-
 histories** để đánh giá chính xác policy phân bổ verification budget. Claim mạnh hơn về
 generalization nên được dành cho vòng cross-model/repeated-rollout tiếp theo.
 
-Artifacts tổng hợp cuối:
 
-- [Full cross-dataset report](../results/cbv_bench_all_28102026/CBV_Bench_all_report.md)
-- [Dataset Level 1/Level 2 coverage](../results/cbv_bench_all_28102026/figures/dataset_level_coverage.png)
-- [Machine-readable level coverage](../results/cbv_bench_all_28102026/dataset_level_coverage.csv)
-- [Full-scale dashboard](../results/cbv_bench_all_28102026/figures/cbv_bench_dashboard.png)
-- [Accuracy by sequence](../results/cbv_bench_all_28102026/figures/accuracy_by_sequence.png)
-- [Accuracy–cost operating points](../results/cbv_bench_all_28102026/figures/accuracy_cost_frontier.png)
-- [Statistical validation figure](../results/cbv_bench_all_28102026/figures/statistical_validation.png)
-- [Strict Pareto frontier](../results/cbv_bench_all_28102026/figures/strict_pareto_frontier.png)
-- [Collection summary](../results/cbv_bench_all_28102026/collection_summary.csv)
-- [Paired sequence accuracy](../results/cbv_bench_all_28102026/sequence_accuracy_paired.csv)
-- [Checkpoint effects](../results/cbv_bench_all_28102026/checkpoint_effects.csv)
-- [Sequence bootstrap and McNemar statistics](../results/cbv_bench_all_28102026/sequence_inference.csv)
-- [Helpful/Harmful confidence intervals](../results/cbv_bench_all_28102026/checkpoint_inference.csv)
-- [Baseline correctness analysis](../results/cbv_bench_all_28102026/baseline_correctness_analysis.csv)
-- [Difficulty analysis](../results/cbv_bench_all_28102026/difficulty_analysis.csv)
-- [Interaction analysis](../results/cbv_bench_all_28102026/interaction_analysis.csv)
-- [Strict Pareto points](../results/cbv_bench_all_28102026/strict_pareto_frontier.csv)
-- [Machine-readable summary](../results/cbv_bench_all_28102026/summary.json)
-- [Reproduction script](../scripts/report_cbv_bench_all.py)
+## 28. DARC v0.2 — Risk/Cost-Aware Controller và frozen-test evaluation
+
+Phần này ghi lại thay đổi từ **DARC v0.1 sang DARC v0.2** và kết quả đánh giá ngày
+30/10/2026. Toàn bộ thí nghiệm dùng counterfactual CBV v0.1 đã cache; không gọi lại
+Student, Teacher hoặc sinh outcome mới. Model/loss/policy được chọn bằng
+**task-grouped out-of-fold predictions trên train**. Frozen test chỉ được nạp sau khi
+đã khóa cấu hình; tuy nhiên do partition này từng được xem trong các phân tích DARC/C3
+trước đó, kết quả test dưới đây là **exploratory**, không phải untouched confirmatory
+evidence.
+
+### 28.1. Thành phần mô hình được giữ nguyên
+
+DARC v0.2 không thay semantic backbone bằng một mạng lớn hơn. Các phần sau được giữ
+nguyên để cô lập ảnh hưởng của loss và decision policy:
+
+- frozen semantic encoder `microsoft/unixcoder-base`;
+- văn bản dài được chia tối đa 5 chunks, `max_length=512`, stride 480, sau đó cache
+  embedding để không encode lại trong mỗi ablation;
+- downstream semantic attention với hidden dimension 128, 4 attention heads và
+  dropout 0.15;
+- ensemble hai neural heads, mỗi member lấy 90% task groups;
+- ba value classes: **Harmful / No-change / Helpful**;
+- hai cost outputs: expected Teacher tokens và upper-quantile Teacher tokens.
+
+Đầu vào online chỉ chứa task, artifact hiện tại, history đã quan sát, checkpoint và
+downstream-role description. Future artifact, actual future cost, `Y_skip`, `Y_verify`
+và oracle checkpoint không được dùng làm inference feature.
+
+### 28.2. Những thay đổi chính từ DARC v0.1
+
+| Thành phần | DARC v0.1 | DARC v0.2 | Mục đích |
+|---|---|---|---|
+| Main value loss | Nhiều biến thể, ranking có thể ảnh hưởng selection | Focal CE hoặc Balanced CE; ranking chỉ là ablation | Tập trung vào Helpful/Harmful hiếm và tách riêng tác dụng ranking |
+| Probability calibration | Calibration tổng quát | Global + checkpoint-specific Platt scaling với rare-event shrinkage | Giảm sai lệch xác suất theo CP1/CP2/CP3 |
+| Verify rule | Gần với `predicted advantage > 0` | Risk/cost-aware utility | Tránh gọi Teacher khi harmful risk, uncertainty hoặc cost quá cao |
+| Wait modeling | Không có so sánh nhẹ Verify-vs-Wait như v0.2 | Train-only shrunk continuation prior | Cho phép chờ checkpoint sau mà không dùng fitted-Q target nhiễu |
+| Checkpoint control | Dễ nghiêng mạnh về CP1 | Margin riêng `[0.06, 0.02, 0.00]` | Yêu cầu evidence mạnh hơn ở checkpoint sớm |
+| Budget guarantee | Dựa chủ yếu vào predicted cost | Reserve cứng 8,192 tokens trước mỗi call | Không vượt hard Teacher-token budget |
+
+Decision utility tại checkpoint hiện tại:
+
+\[
+U_{verify}=P(H)-w_hP(D)-\beta\sigma_A-\lambda C_{pressure}-m_{cp}
+\]
+
+\[
+U_{wait}=w_{cont}\,V_{future}(dataset,cp)\,
+\frac{B_{remaining}}{B_{total}}
+\]
+
+Trong đó `H` là Helpful, `D` là Harmful, `sigma_A` là ensemble uncertainty,
+`C_pressure` là predicted cost so với allowance hiện tại, và `V_future` chỉ là prior
+thấp chiều học từ train OOF. Controller Verify khi call khả thi theo hard reservation
+và `U_verify > U_wait`. Đây **không phải fitted-Q** và không nhìn future state tại
+inference.
+
+### 28.3. Loss ablation và cấu hình được chọn
+
+| Candidate | Loss | Ranking | Được phép chọn làm main | Train-OOF Helpful AUPRC | Train-OOF Harmful AUPRC | Train-OOF gain r |
+|---|---|---:|---:|---:|---:|---:|
+| **Focal** | Focal CE, `gamma=2.0` | Không | **Có — được chọn** | **0.065** | 0.021 | **0.032** |
+| Balanced | Class-balanced CE, `beta=0.999` | Không | Có | 0.052 | 0.021 | −0.001 |
+| Balanced + Ranking | Balanced CE + paired ranking, weight 0.25 | Có | Không, ablation-only | 0.058 | 0.021 | 0.021 |
+
+Ranking loss được giữ để đo contribution nhưng bị loại khỏi main-model selection theo
+protocol đã khóa. Cấu hình policy cuối của Focal là:
+
+- harmful weight `2.0`;
+- uncertainty penalty `1.0`;
+- continuation weight `0.5`;
+- checkpoint margins CP1/CP2/CP3 = `0.06/0.02/0.00`;
+- expected-cost mode;
+- `cost_lambda=0.0`: cost term đã được implement và search nhưng OOF selection không
+  xác nhận lợi ích của penalty dương. Hard budget reservation vẫn luôn được áp dụng.
+
+#### 28.3.1. Training dynamics và mức độ hội tụ
+
+Training history thực tế được lưu bên trong từng checkpoint `.pt`. Hình dưới được dựng
+lại trực tiếp từ các history này, không train lại model.
+
+![DARC v0.2 training diagnostics](../results/darc_v02_29102026/figures/darc_v02_training_diagnostics.png)
+
+*Hình 28.1 — DARC v0.2 training diagnostics. Panel (a) là mean ± member range của
+final-refit objective cho Focal; panel (b) tách các loss contribution; panel (c) là
+median best epoch của hai ensemble members trong từng grouped-CV fold. Hai panel đầu
+chỉ đo in-sample optimization vì final refit dùng toàn bộ train; chúng không được gọi
+là held-out validation curves.*
+
+| Candidate | Grouped-CV median best epochs theo fold | Final refit epochs | Diễn giải |
+|---|---:|---:|---|
+| **Focal CE** | **61 / 83 / 111** | **100** | Selected; một fold đạt best gần cap 120 |
+| Balanced CE | 54 / 39 / 40 | 42 | Dừng sớm và ổn định hơn giữa các fold |
+| Balanced CE + Ranking | 42 / 35 / 38 | 38 | Ranking ablation hội tụ sớm hơn nhưng predictor kém hơn Focal |
+
+Kết luận đúng về convergence là **mixed**, không phải “chưa train xong” cũng không phải
+“đã hội tụ hoàn toàn”:
+
+1. Final Focal refit đã chạy đủ **100 epochs** được chọn từ train grouped-CV; objective
+   trung bình giảm từ khoảng **0.260 xuống 0.008**, không có dấu hiệu numerical
+   divergence.
+2. Hai CV folds chọn epoch 61 và 83, nhưng fold thứ ba chọn epoch **111/120**. Khoảng
+   còn lại nhỏ hơn patience 16, nên evidence chưa đủ để nói mọi fold đã plateau hoàn
+   toàn trước cap.
+3. Final refit cố ý tắt early stopping và chạy fixed epoch count đã chọn từ CV. Việc
+   dùng final-refit monitoring loss để chọn lại epoch sẽ làm sai protocol và có nguy
+   cơ leakage.
+4. Vì vậy model hiện tại là **trained-to-protocol và dùng được để evaluation**, nhưng
+   một ablation tương lai có thể tăng cap lên 160–180 chỉ trong train grouped-CV để
+   kiểm tra fold 3; tuyệt đối không chọn epoch bằng frozen test.
+
+### 28.4. Bảng độ chính xác trên validation
+
+| Policy | Accuracy (95% CI) | Gain vs Never | Calls | Teacher tokens | Helpful/Harmful | CP1/CP2/CP3 |
+|---|---:|---:|---:|---:|---:|---:|
+| Joint MLP + Threshold | **42.40%** [35.94, 48.85] | +3.69 pp | 162 | 250,542 | 9/1 | 107/42/13 |
+| DARC v0.1 Full | 41.94% [35.48, 48.39] | +3.23 pp | 181 | 285,324 | 8/1 | 99/71/11 |
+| Always CP2 | 41.94% [35.48, 48.39] | +3.23 pp | 207 | 340,647 | 10/3 | 0/207/0 |
+| **DARC v0.2 Full** | **41.47%** [35.02, 47.93] | **+2.76 pp** | **140** | **276,021** | **6/0** | **0/3/137** |
+| C3 Myopic | 41.47% [35.02, 47.93] | +2.76 pp | 142 | 220,720 | 6/0 | 66/56/20 |
+| Never Verify | 38.71% [32.26, 45.16] | 0.00 pp | 0 | 0 | 0/0 | 0/0/0 |
+
+Validation cho thấy v0.2 loại bỏ CP1 bias và harmful selections trong sample này,
+nhưng chưa vượt Joint MLP, C3 hoặc v0.1 về accuracy–cost. Đồng thời, bias chuyển gần
+như hoàn toàn sang CP3 (`137/140` calls).
+
+![DARC v0.2 validation accuracy summary](../results/darc_v02_29102026/figures/darc_v02_validation_accuracy_summary.png)
+
+*Hình 28.2 — Full-budget validation accuracy với task-bootstrap 95% CI. DARC v0.2 được
+đánh dấu bằng ngôi sao đỏ; đường đứt là Never Verify. Hình này thể hiện uncertainty
+của model selection, không phải superiority claim.*
+
+### 28.5. Bảng độ chính xác trên frozen test
+
+Frozen test gồm 216 tasks và dùng protocol `A-single-strict`, tối đa một Teacher call
+cho mỗi task. Không policy nào vượt hard token budget.
+
+| Policy | Accuracy (95% CI) | Gain vs Never | Calls | Teacher tokens | Helpful/Harmful | Wasted | CP1/CP2/CP3 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| Always CP2 | **36.57%** [30.09, 43.06] | +3.70 pp | 205 | 339,777 | 11/3 | 191 | 0/205/0 |
+| Joint MLP + Threshold | 36.11% [29.63, 42.59] | +3.24 pp | 172 | 265,311 | 11/4 | 157 | 111/52/9 |
+| **DARC v0.2 Full** | **35.65%** [29.17, 42.13] | **+2.78 pp** | **127** | **254,784** | **6/0** | **121** | **0/2/125** |
+| C3 Myopic | 35.19% [29.16, 41.67] | +2.31 pp | 131 | 206,454 | 6/1 | 124 | 49/59/23 |
+| DARC v0.1 Full | 33.80% [27.31, 40.28] | +0.93 pp | 184 | 291,765 | 6/4 | 174 | 102/65/17 |
+| Never Verify | 32.87% [26.85, 39.35] | 0.00 pp | 0 | 0 | 0/0 | 0 | 0/0/0 |
+
+DARC v0.2 cải thiện **+1.85 pp** so với v0.1, giảm Teacher calls từ 184 xuống 127,
+giảm tokens từ 291,765 xuống 254,784 và giảm harmful interventions từ 4 xuống 0.
+Hai phiên bản cùng chọn được 6 Helpful cases, nên phần tăng accuracy của v0.2 chủ yếu
+đến từ **tránh bốn lần verification gây hại**, không phải phát hiện thêm Helpful.
+
+![DARC v0.2 strengths scorecard](../results/darc_v02_29102026/test_evaluation/figures/darc_v02_strengths_scorecard.png)
+
+*Hình 28.3 — Paper-style strengths scorecard trên các active policies. DARC v0.2 dẫn
+đầu ba chỉ số verification-efficiency: 0 harmful interventions, ít Teacher calls nhất
+(127), và net benefit cao nhất trên 100 calls. Net benefit được định nghĩa rõ là
+`100 × (Helpful − Harmful) / Teacher calls`; đây là efficiency metric, không thay thế
+final accuracy. Banner phía dưới giữ kết quả downstream chính: 35.65% accuracy và
++2.78 pp so với Never Verify.*
+
+![DARC v0.2 frozen-test paper summary](../results/darc_v02_29102026/test_evaluation/figures/darc_v02_frozen_test_paper_summary.png)
+
+*Hình 28.4 — Paper-style frozen-test summary. Panel (a) báo cáo accuracy và 95% CI;
+panel (b) chỉ dùng full-budget point để tránh rối, đồng thời làm nổi bật thay đổi
+v0.1 → v0.2: +1.85 pp accuracy, −12.7% Teacher tokens và 4 → 0 harmful calls. Joint
+MLP và Always CP2 vẫn có point accuracy cao hơn, nên hình không hàm ý v0.2 là model
+có raw accuracy tốt nhất.*
+
+### 28.6. Diễn giải và giới hạn
+
+1. **Risk control đã cải thiện:** frozen test không có harmful call và không có budget
+   overshoot. Đây là cải thiện vận hành rõ so với v0.1.
+2. **Value learning vẫn yếu:** Helpful AUPRC = 0.052, Harmful AUPRC = 0.020 và
+   predicted-vs-actual gain Pearson `r = -0.005` trên frozen test. Model chưa xếp hạng
+   tốt task nào đáng verify.
+3. **Phần lớn calls chưa tạo giá trị:** 121/127 calls của v0.2 là No-change, tương
+   đương 95.3%; model còn bỏ lỡ 6 Helpful cases.
+4. **CP1 bias chưa được giải quyết hoàn toàn theo nghĩa routing:** margin riêng đã loại
+   CP1, nhưng controller lại gần như trở thành “đợi CP3”. Cần cải thiện discrimination
+   giữa các task/checkpoint thay vì tiếp tục tăng margin thủ công.
+5. **Không có superiority claim:** confidence intervals giữa các learned policy chồng
+   lấp mạnh. Frozen test đã từng được inspect, vì vậy không được tune tiếp trên cùng
+   partition rồi dùng lại để tuyên bố confirmatory improvement.
+
+
+### 28.7. Data Audit và Observed-Branch Oracle Upper Bound
+
+Phân tích này được chạy hoàn toàn offline trên frozen CBV v0.1; không gọi lại
+Student/Teacher và không retrain DARC. Oracle được phép đọc `Y_skip`, `Y_verify` và
+actual Teacher cost, nên chỉ là **post-hoc upper bound** để đo headroom của dữ liệu,
+không phải policy có thể deploy hoặc target được phép dùng để tune model.
+
+#### 28.7.1. Nhãn có sạch không và có bị mất cân bằng không?
+
+Audit kiểm tra **4,299 paired states thuộc 1,433 task groups**:
+
+- `Delta = Y_verify - Y_skip` đúng ở 4,299/4,299 records;
+- value label đúng ở 4,299/4,299 records;
+- không có task thiếu CP1/CP2/CP3, baseline disagreement hoặc train/validation/test
+  overlap;
+- mọi outcome đều binary và mọi Teacher cost đều không âm.
+
+Vì vậy vấn đề hiện tại không phải label bị tính sai. Vấn đề là **rare-event class
+imbalance**: No-change chiếm 93.1%–96.3% tùy split/checkpoint.
+
+![DARC label distribution audit](../results/darc_v02_29102026/data_audit_oracle/figures/01_label_distribution.png)
+
+*Hình 28.5 — Phân bố Helpful/Harmful/No-change tại CP1, CP2, CP3 trên train,
+validation và frozen test. Train có 1,000 task, validation 217 task và test 216 task;
+mỗi task cung cấp đúng một paired state cho mỗi checkpoint.*
+
+| Split | CP1 H/D/N | CP2 H/D/N | CP3 H/D/N |
+|---|---:|---:|---:|
+| Train | 27 / 15 / 958 | 54 / 14 / 932 | 55 / 9 / 936 |
+| Validation | 7 / 1 / 209 | 10 / 3 / 204 | 8 / 0 / 209 |
+| Frozen test | 8 / 4 / 204 | 12 / 3 / 201 | 10 / 0 / 206 |
+
+`H/D/N` lần lượt là Helpful, Harmful và No-change. Nhiều sample không tự động tạo
+nhiều supervision có ích: train có 3,000 states nhưng chỉ 136 Helpful và 38 Harmful
+states. Đây là lý do value learning khó dù dataset đã được thu thập và kiểm tra sạch.
+
+#### 28.7.2. Actual downstream gain và opportunity thực sự
+
+Trên frozen test, mean actual `Delta` là **+1.85 pp tại CP1**, **+4.17 pp tại CP2**
+và **+4.63 pp tại CP3**. Tuy nhiên đây là trung bình hậu nghiệm; nó không có nghĩa
+mọi task nên đợi CP3.
+
+![DARC actual gain audit](../results/darc_v02_29102026/data_audit_oracle/figures/02_actual_gain_audit.png)
+
+*Hình 28.6 — Panel (a) tách Helpful/Harmful rate và net actual gain theo checkpoint;
+panel (b) cho thấy distribution shift theo dataset; panel (c) phân rã 216 test tasks
+thành đã đúng, có thể được cứu bởi ít nhất một observed branch, và không có observed
+single-VERIFY branch nào cứu được.*
+
+Trong 216 test tasks:
+
+- **71 task (32.9%)** đã đúng khi Never Verify;
+- chỉ **19 task (8.8%)** có ít nhất một nhánh VERIFY biến sai thành đúng;
+- **126 task (58.3%)** vẫn sai ở mọi observed single-VERIFY branch.
+
+Như vậy data có opportunity thật nhưng khá thưa. Upper bound của protocol hiện tại
+không thể vượt `71 + 19 = 90` task đúng nếu chỉ dùng các nhánh đã quan sát và tối đa
+một intervention/task.
+
+#### 28.7.3. Oracle trong cùng Teacher-token budget
+
+Với outcome binary, mỗi Helpful intervention đều tăng đúng một task correct. Oracle
+chọn checkpoint Helpful rẻ nhất cho từng task, sau đó chọn các task theo actual token
+cost tăng dần. Đây là nghiệm exact của bài toán budgeted replay này vì mỗi task có
+cùng utility `+1` và chỉ được VERIFY tối đa một lần.
+
+![DARC observed-branch Oracle](../results/darc_v02_29102026/data_audit_oracle/figures/03_oracle_upper_bound.png)
+
+*Hình 28.7 — Panel (a) so sánh DARC v0.2 với post-hoc Oracle tại cùng actual Teacher
+token spend; panel (b) phân rã accuracy. Oracle nhìn actual outcome/cost nên đường tím
+là upper bound phân tích, không phải deployable result.*
+
+| DARC budget | DARC actual tokens | DARC accuracy | Oracle cùng actual spend | Selection gap |
+|---:|---:|---:|---:|---:|
+| 0% | 0 | 32.87% | 32.87% | 0.00 pp |
+| 25% | 80,145 | 33.80% | **41.67%** | 7.87 pp |
+| 50% | 166,165 | 33.80% | **41.67%** | 7.87 pp |
+| 75% | 253,017 | 35.65% | **41.67%** | 6.02 pp |
+| 100% | 254,784 | **35.65%** | **41.67%** | **6.02 pp** |
+
+Oracle đạt ceiling **90/216 = 41.67%** chỉ với **19 calls và 29,883 actual Teacher
+tokens**. Checkpoint rẻ nhất trong 19 Helpful tasks phân bố CP1/CP2/CP3 = **7/10/2**,
+trong khi DARC full chọn **0/2/125**. Do đó CP3 có unconditional mean gain cao nhất
+nhưng không phải cost-aware optimum cho phần lớn task có thể cứu.
+
+#### 28.7.4. DARC chọn sai hay dữ liệu không có cơ hội?
+
+**Cả hai cùng tồn tại, nhưng lỗi selection là vấn đề trực tiếp lớn hơn.**
+
+Trong 19 rescuable tasks, DARC:
+
+- chọn đúng Helpful checkpoint cho **6 task**;
+- gọi Teacher nhưng chọn sai checkpoint ở **7 task** có Helpful alternative;
+- không gọi Teacher ở **6 task** còn lại;
+- tổng cộng gọi 127 lần nhưng **121/127 (95.3%)** là No-change.
+
+DARC chỉ thu được **6/19 = 31.6% available task-level gain**. Vì Oracle còn tăng
+được từ 35.65% lên 41.67% ngay tại cùng actual spend, không thể kết luận data không
+cung cấp đủ cơ hội. Đồng thời 19/216 là positive base rate thấp, nên model đang phải
+xếp hạng rare Helpful states giữa rất nhiều No-change states.
+
+Ưu tiên tiếp theo nên là:
+
+1. cải thiện Helpful ranking/AUPRC thay vì tăng số Teacher calls;
+2. học so sánh checkpoint trong cùng task để tránh “đợi CP3 cho gần như mọi task”;
+3. đánh giá cost-aware top-k/ranking loss trên train grouped-CV nhưng không tune lại
+   trên frozen test đã inspect;
+4. báo cáo cả `gain capture = selected Helpful / rescuable tasks` và wasted-call rate,
+   không chỉ final accuracy.
+
+Artifacts tái lập:
+
+- [Data Audit + Oracle report](../results/darc_v02_29102026/data_audit_oracle/report/darc_data_audit_oracle.md)
+- [Label distribution table](../results/darc_v02_29102026/data_audit_oracle/tables/label_distribution.csv)
+- [Gain by dataset/checkpoint](../results/darc_v02_29102026/data_audit_oracle/tables/gain_by_dataset_checkpoint.csv)
+- [Per-task Oracle choices](../results/darc_v02_29102026/data_audit_oracle/tables/test_task_oracle.csv)
+- [Oracle vs DARC table](../results/darc_v02_29102026/data_audit_oracle/tables/oracle_vs_darc.csv)
+- [Reproducible analysis script](../scripts/analyze_darc_data_oracle.py)

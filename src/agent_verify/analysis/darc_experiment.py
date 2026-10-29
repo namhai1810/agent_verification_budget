@@ -96,6 +96,18 @@ def _assert_disjoint(partitions: dict[str, list[DARCExample]]) -> None:
             raise AssertionError(f"DARC task leakage between {left}/{right}: {sorted(overlap)[:5]}")
 
 
+def _assert_hard_call_cap(
+    examples: list[DARCExample], *, split: str, hard_call_token_cap: int
+) -> None:
+    violations = [row for row in examples if row.teacher_total_tokens > hard_call_token_cap]
+    if violations:
+        sample = violations[0]
+        raise ValueError(
+            f"Configured hard_call_token_cap={hard_call_token_cap} is not a valid upper bound "
+            f"for {split}; {sample.state_key} used {sample.teacher_total_tokens} tokens"
+        )
+
+
 def _split_rows(partitions: dict[str, list[DARCExample]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for split, examples in partitions.items():
@@ -147,13 +159,22 @@ def replay_darc(
     margin: float,
     uncertainty_beta: float,
     cost_mode: str,
+    score_mode: str,
+    budget_accounting: str,
+    hard_call_token_cap: int,
     token_budget: int,
     budget_fraction: float,
     seed: int,
     scope: str,
-) -> tuple[ReplayResult, list[dict[str, Any]]]:
+) -> tuple[ReplayResult, list[dict[str, Any]], dict[str, Any]]:
     if cost_mode not in {"expected", "upper"}:
         raise ValueError(f"Unknown DARC cost admission mode: {cost_mode}")
+    if score_mode not in {"advantage", "advantage_per_1k"}:
+        raise ValueError(f"Unknown DARC score mode: {score_mode}")
+    if budget_accounting not in {"predicted_compatible", "hard_cap"}:
+        raise ValueError(f"Unknown budget accounting mode: {budget_accounting}")
+    if hard_call_token_cap <= 0:
+        raise ValueError("hard_call_token_cap must be positive")
     costs = (
         prediction.expected_total_tokens
         if cost_mode == "expected"
@@ -162,7 +183,7 @@ def replay_darc(
     conservative = prediction.advantage - uncertainty_beta * prediction.advantage_uncertainty
     grouped = _group_indices(examples)
     task_keys = _stable_order(grouped, seed)
-    remaining = float(token_budget)
+    predicted_remaining = float(token_budget)
     outcomes: list[float] = []
     baselines: list[float] = []
     checkpoints: list[int] = []
@@ -172,8 +193,17 @@ def replay_darc(
     for key in task_keys:
         chosen: int | None = None
         for index in grouped[key]:
-            feasible = float(costs[index]) <= remaining
-            verify = float(conservative[index]) > float(margin) and feasible
+            predicted_cost = max(float(costs[index]), 1.0)
+            decision_score = float(conservative[index])
+            if score_mode == "advantage_per_1k":
+                decision_score = 1000.0 * decision_score / predicted_cost
+            if budget_accounting == "hard_cap":
+                feasible = actual_tokens + hard_call_token_cap <= token_budget
+                admission_reservation = float(hard_call_token_cap)
+            else:
+                feasible = predicted_cost <= predicted_remaining
+                admission_reservation = predicted_cost
+            verify = decision_score > float(margin) and feasible
             traces.append(
                 {
                     "task_key": key,
@@ -186,8 +216,13 @@ def replay_darc(
                     "predicted_advantage": float(prediction.advantage[index]),
                     "uncertainty": float(prediction.advantage_uncertainty[index]),
                     "conservative_advantage": float(conservative[index]),
-                    "predicted_cost": float(costs[index]),
-                    "remaining_budget_before": remaining,
+                    "decision_score": decision_score,
+                    "score_mode": score_mode,
+                    "predicted_cost": predicted_cost,
+                    "admission_reservation": admission_reservation,
+                    "predicted_remaining_before": predicted_remaining,
+                    "actual_tokens_before": actual_tokens,
+                    "budget_accounting": budget_accounting,
                     "feasible": feasible,
                     "verify": verify,
                     "actual_delta": examples[index].delta,
@@ -203,9 +238,15 @@ def replay_darc(
             checkpoints.append(0)
             continue
         predicted = max(float(costs[chosen]), 0.0)
-        remaining -= predicted
+        actual = int(examples[chosen].teacher_total_tokens)
+        if budget_accounting == "hard_cap" and actual > hard_call_token_cap:
+            raise RuntimeError(
+                f"Observed Teacher call cost {actual} exceeds configured hard cap "
+                f"{hard_call_token_cap} for {examples[chosen].state_key}"
+            )
+        predicted_remaining -= predicted
         predicted_tokens += predicted
-        actual_tokens += examples[chosen].teacher_total_tokens
+        actual_tokens += actual
         outcomes.append(float(examples[chosen].y_verify))
         checkpoints.append(examples[chosen].checkpoint)
     selected = np.asarray(checkpoints)
@@ -224,7 +265,20 @@ def replay_darc(
         actual_tokens=actual_tokens,
         predicted_tokens=predicted_tokens,
     )
-    return replay, traces
+    audit = {
+        "budget_accounting": budget_accounting,
+        "score_mode": score_mode,
+        "cost_mode": cost_mode,
+        "hard_call_token_cap": hard_call_token_cap,
+        "actual_budget_overshoot_tokens": max(actual_tokens - token_budget, 0),
+        "predicted_budget_overshoot_tokens": max(predicted_tokens - token_budget, 0.0),
+        "reservation_tokens_sum": int(np.sum(selected > 0)) * hard_call_token_cap
+        if budget_accounting == "hard_cap"
+        else predicted_tokens,
+    }
+    if budget_accounting == "hard_cap" and actual_tokens > token_budget:
+        raise AssertionError("Hard-cap DARC replay exceeded the actual Teacher-token budget")
+    return replay, traces, audit
 
 
 def _validation_policy_selection(
@@ -245,7 +299,10 @@ def _validation_policy_selection(
         len(config["calibration"]["uncertainty_beta_grid"])
         * len(config["calibration"]["margin_grid"])
         * len(config["calibration"]["cost_admission_grid"])
+        * len(config["calibration"]["score_mode_grid"])
     )
+    budget_accounting = str(config["evaluation"]["darc_budget_accounting"])
+    hard_call_token_cap = int(config["evaluation"]["hard_call_token_cap"])
     for beta in tqdm(
         config["calibration"]["uncertainty_beta_grid"],
         desc="DARC validation margins",
@@ -254,43 +311,55 @@ def _validation_policy_selection(
     ):
         for margin in config["calibration"]["margin_grid"]:
             for cost_mode in config["calibration"]["cost_admission_grid"]:
-                replays = [
-                    replay_darc(
-                        examples,
-                        prediction,
-                        policy="DARC validation",
-                        margin=float(margin),
-                        uncertainty_beta=float(beta),
-                        cost_mode=str(cost_mode),
-                        token_budget=int(budgets[fraction]),
-                        budget_fraction=fraction,
-                        seed=seed,
-                        scope="combined",
-                    )[0]
-                    for fraction in fractions
-                ]
-                mean_accuracy = float(np.mean([row.outcomes.mean() for row in replays]))
-                mean_calls = float(np.mean([row.calls for row in replays]))
-                mean_tokens = float(np.mean([row.actual_tokens for row in replays]))
-                harmful = int(
-                    sum(np.sum((row.outcomes - row.baseline) < 0) for row in replays)
-                )
-                row = {
-                    "uncertainty_beta": float(beta),
-                    "margin": float(margin),
-                    "cost_mode": str(cost_mode),
-                    "mean_validation_accuracy": mean_accuracy,
-                    "mean_teacher_calls": mean_calls,
-                    "mean_actual_tokens": mean_tokens,
-                    "harmful_interventions": harmful,
-                }
-                rows.append(row)
-                # Accuracy is primary. Ties select fewer harmful outcomes, fewer tokens,
-                # and finally the larger conservative margin. All labels are validation-only.
-                key = (mean_accuracy, -harmful, -mean_tokens, float(margin))
-                if best is None or key > best:
-                    best = key
-                    selected = row
+                for score_mode in config["calibration"]["score_mode_grid"]:
+                    results = [
+                        replay_darc(
+                            examples,
+                            prediction,
+                            policy="DARC validation",
+                            margin=float(margin),
+                            uncertainty_beta=float(beta),
+                            cost_mode=str(cost_mode),
+                            score_mode=str(score_mode),
+                            budget_accounting=budget_accounting,
+                            hard_call_token_cap=hard_call_token_cap,
+                            token_budget=int(budgets[fraction]),
+                            budget_fraction=fraction,
+                            seed=seed,
+                            scope="combined",
+                        )
+                        for fraction in fractions
+                    ]
+                    replays = [result[0] for result in results]
+                    audits = [result[2] for result in results]
+                    mean_accuracy = float(np.mean([row.outcomes.mean() for row in replays]))
+                    mean_calls = float(np.mean([row.calls for row in replays]))
+                    mean_tokens = float(np.mean([row.actual_tokens for row in replays]))
+                    harmful = int(
+                        sum(np.sum((row.outcomes - row.baseline) < 0) for row in replays)
+                    )
+                    row = {
+                        "uncertainty_beta": float(beta),
+                        "margin": float(margin),
+                        "cost_mode": str(cost_mode),
+                        "score_mode": str(score_mode),
+                        "budget_accounting": budget_accounting,
+                        "hard_call_token_cap": hard_call_token_cap,
+                        "mean_validation_accuracy": mean_accuracy,
+                        "mean_teacher_calls": mean_calls,
+                        "mean_actual_tokens": mean_tokens,
+                        "max_actual_overshoot": max(
+                            int(audit["actual_budget_overshoot_tokens"]) for audit in audits
+                        ),
+                        "harmful_interventions": harmful,
+                    }
+                    rows.append(row)
+                    # Accuracy is primary. Ties select fewer harmful outcomes, fewer tokens,
+                    # and finally the larger conservative margin. All labels are validation-only.
+                    key = (mean_accuracy, -harmful, -mean_tokens, float(margin))
+                    if best is None or key > best:
+                        best = key
+                        selected = row
     if selected is None or len(rows) != total:
         raise RuntimeError("Incomplete DARC validation policy search")
     return selected, rows
@@ -323,9 +392,20 @@ def _select_and_train_models(
     seed = int(config["reproducibility"]["seed"])
     device_name = str(config["semantic_encoder"].get("device", "auto"))
     deterministic = bool(config["reproducibility"].get("deterministic_torch", True))
+    progress_config = dict(config.get("progress", {}))
     model_root = output / "models"
-    for ablation_index, ablation in enumerate(config["ablations"]):
+    ablation_progress = tqdm(
+        enumerate(config["ablations"]),
+        total=len(config["ablations"]),
+        desc="DARC ablations",
+        unit="ablation",
+        dynamic_ncols=True,
+        disable=not bool(progress_config.get("enabled", True)),
+        mininterval=float(progress_config.get("mininterval_seconds", 1.0)),
+    )
+    for ablation_index, ablation in ablation_progress:
         name = str(ablation["name"])
+        ablation_progress.set_postfix(name=name, stage="prepare")
         if "reuse_model_from" in ablation:
             source = str(ablation["reuse_model_from"])
             if source not in registry:
@@ -338,6 +418,7 @@ def _select_and_train_models(
             model = DARCEnsemble.load(target_path)
             model.temperature = 1.0
             if bool(ablation.get("calibrate")):
+                ablation_progress.set_postfix(name=name, stage="calibrate")
                 labels = np.asarray([row.value_label for row in validation_examples], dtype=int)
                 temperature, rows = calibrate_temperature(
                     model,
@@ -368,6 +449,7 @@ def _select_and_train_models(
                 "policy": policy,
                 "validation_metrics": metrics,
             }
+            ablation_progress.set_postfix(name=name, stage="complete")
             continue
 
         candidates: list[dict[str, Any]] = []
@@ -376,22 +458,25 @@ def _select_and_train_models(
             model_path = candidate_dir / "model.pt"
             metrics_path = candidate_dir / "validation_metrics.json"
             if resume and model_path.exists() and metrics_path.exists():
+                ablation_progress.set_postfix(name=name, stage="resume-cache")
                 model = DARCEnsemble.load(model_path)
                 metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
             else:
+                ablation_progress.set_postfix(name=name, stage=f"train-{loss_mode}")
                 model = train_ensemble(
                     train_examples,
                     train_encoded,
                     validation_examples,
                     validation_encoded,
                     params=model_params,
-                    use_attention=bool(ablation.get("downstream_attention")),
+                    downstream_mode=str(ablation.get("downstream_mode", "none")),
                     loss_mode=str(loss_mode),
                     paired_ranking=bool(ablation.get("paired_ranking")),
                     seed=seed + ablation_index * 10007 + candidate_index * 503,
                     device_name=device_name,
                     deterministic=deterministic,
                     description=f"{name}/{loss_mode}",
+                    progress=progress_config,
                 )
                 prediction = model.predict(validation_encoded, device_name=device_name)
                 metrics = prediction_metrics(
@@ -424,10 +509,39 @@ def _select_and_train_models(
             "model_path": str(selected_path),
             "display_name": str(ablation["display_name"]),
             "temperature": 1.0,
-            "policy": {"margin": 0.0, "uncertainty_beta": 0.0, "cost_mode": "expected"},
+            "policy": {
+                "margin": 0.0,
+                "uncertainty_beta": 0.0,
+                "cost_mode": "expected",
+                "score_mode": "advantage",
+                "budget_accounting": "predicted_compatible",
+                "hard_call_token_cap": int(config["evaluation"]["hard_call_token_cap"]),
+            },
             "validation_metrics": selected["metrics"],
         }
+        ablation_progress.set_postfix(name=name, stage="complete")
+    ablation_progress.close()
     return registry, selection_rows, calibration_rows
+
+
+def _training_history_rows(registry: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for ablation, entry in registry.items():
+        model: DARCEnsemble = entry["model"]
+        for member_index, member in enumerate(model.members, start=1):
+            for epoch in member.history:
+                rows.append(
+                    {
+                        "ablation": ablation,
+                        "display_name": entry["display_name"],
+                        "loss_mode": model.loss_mode,
+                        "downstream_mode": model.downstream_mode,
+                        "member": member_index,
+                        "selected_best_epoch": member.best_epoch,
+                        **epoch,
+                    }
+                )
+    return rows
 
 
 def _metric_rows(
@@ -477,13 +591,35 @@ def _baseline_rows(baseline_root: Path, allowed: set[str]) -> list[dict[str, Any
         raise FileNotFoundError(f"Existing CBV baseline table is required: {path}")
     with path.open(newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    return [
+    selected = [
         row
         for row in rows
         if row.get("protocol") == "A-single"
         and row.get("train_mode") in {"combined", "none"}
         and row.get("policy") in allowed
     ]
+    learned = {
+        "Joint + Threshold",
+        "Separate + Threshold",
+        "Legacy Compact Boosting",
+        "C3 Myopic",
+    }
+    for row in selected:
+        row["budget_accounting"] = (
+            "predicted_compatible" if row.get("policy") in learned else "offline_actual_cost"
+        )
+        row["actual_budget_overshoot_tokens"] = int(
+            float(row.get("budget_overshoot_tokens", 0) or 0)
+        )
+        row["predicted_budget_overshoot_tokens"] = max(
+            float(row.get("predicted_teacher_tokens", 0) or 0)
+            - float(row.get("token_budget", 0) or 0),
+            0.0,
+        )
+        row["hard_call_token_cap"] = ""
+        row["score_mode"] = "legacy"
+        row["cost_mode"] = "legacy"
+    return selected
 
 
 def _evaluate_policies(
@@ -513,19 +649,24 @@ def _evaluate_policies(
             prediction = _prediction_subset(predictions[name], subset_indices)
             policy = entry["policy"]
             for fraction in fractions:
-                replay, traces = replay_darc(
+                replay, traces, audit = replay_darc(
                     subset,
                     prediction,
                     policy=entry["display_name"],
                     margin=float(policy["margin"]),
                     uncertainty_beta=float(policy["uncertainty_beta"]),
                     cost_mode=str(policy["cost_mode"]),
+                    score_mode=str(policy["score_mode"]),
+                    budget_accounting=str(policy["budget_accounting"]),
+                    hard_call_token_cap=int(policy["hard_call_token_cap"]),
                     token_budget=int(budgets[fraction]),
                     budget_fraction=fraction,
                     seed=seed,
                     scope=str(scope),
                 )
-                rows.append(_bootstrap_summary(replay, seed=seed, repetitions=bootstrap))
+                summary = _bootstrap_summary(replay, seed=seed, repetitions=bootstrap)
+                summary.update(audit)
+                rows.append(summary)
                 if scope == "combined" and fraction == 1.0:
                     trace_rows.extend({"ablation": name, **trace} for trace in traces)
     return rows, trace_rows
@@ -618,6 +759,14 @@ def _failure_rows(
     return summaries
 
 
+def _coverage_rows(caches: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for split, manifest in caches.items():
+        for field, metrics in manifest.get("coverage_by_field", {}).items():
+            rows.append({"split": split, "field": field, **metrics})
+    return rows
+
+
 def _make_figures(
     output: Path,
     metric_rows: list[dict[str, Any]],
@@ -650,7 +799,7 @@ def _make_figures(
     plt.close(fig)
     combined = [row for row in policy_rows if row.get("scope") == "combined"]
     selected_names = {
-        "A4 DARC full",
+        "DARC Full",
         "Joint + Threshold",
         "C3 Myopic",
         "Always CP2",
@@ -776,6 +925,7 @@ def _write_report(
     registry: dict[str, dict[str, Any]],
     overhead_rows: list[dict[str, Any]],
     failure_rows: list[dict[str, Any]],
+    coverage_rows: list[dict[str, Any]],
 ) -> Path:
     report = output / "report" / "darc_v01_report.md"
     report.parent.mkdir(parents=True, exist_ok=True)
@@ -824,7 +974,8 @@ def _write_report(
         "",
         f"- Frozen encoder: `{config['semantic_encoder']['model_id']}` at revision `{config['semantic_encoder'].get('revision', 'main')}`.",
         "- Intervention advantage: `P(Helpful) - P(Harmful)`.",
-        "- Conservative score: `advantage - beta × ensemble_std`; Verify only when it exceeds the validation-selected margin and predicted cost is feasible.",
+        "- Conservative score: `advantage - beta × ensemble_std`, optionally normalized per 1k predicted tokens.",
+        f"- Hard budget: DARC Full reserves `{config['evaluation']['hard_call_token_cap']}` tokens before every call and refunds unused capacity after observed usage; actual spend therefore cannot exceed the cap.",
         "- Protocol: maximum one Teacher verification per task. No fitted continuation/RL is used.",
         "",
         "## Leakage and protocol audit",
@@ -861,15 +1012,15 @@ def _write_report(
             "",
             "## Full-budget policy comparison",
             "",
-            "| Policy | Accuracy | Gain vs Never (pp) | Calls | Actual Teacher tokens | Helpful | Harmful |",
-            "|---|---:|---:|---:|---:|---:|---:|",
+            "| Policy | Accounting | Accuracy | Gain vs Never (pp) | Calls | Actual tokens | Overshoot | Helpful | Harmful |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
     for name in desired_order:
         row = selected_policy.get(name)
         if row:
             lines.append(
-                f"| {name} | {100 * float(row['accuracy']):.2f}% | {_fmt(row['gain_vs_never_pp'], 2)} | {row['teacher_calls']} | {int(float(row['actual_teacher_tokens'])):,} | {row['helpful_selected']} | {row['harmful_selected']} |"
+                f"| {name} | {row.get('budget_accounting', 'legacy')} | {100 * float(row['accuracy']):.2f}% | {_fmt(row['gain_vs_never_pp'], 2)} | {row['teacher_calls']} | {int(float(row['actual_teacher_tokens'])):,} | {int(float(row.get('actual_budget_overshoot_tokens', 0))):,} | {row['helpful_selected']} | {row['harmful_selected']} |"
             )
     lines.extend(
         [
@@ -891,6 +1042,21 @@ def _write_report(
     lines.extend(
         [
             "",
+            "## Semantic input coverage",
+            "",
+            "Long inputs are chunked into at most the configured number of 512-token windows and mean-pooled. Coverage is measured before model training.",
+            "",
+            "| Split | Field | Texts | Mean tokens | P95 | >1 window | Mean retained | Minimum retained | Chunks |",
+            "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        ]
+    )
+    for row in coverage_rows:
+        lines.append(
+            f"| {row['split']} | {row['field']} | {row['texts']} | {_fmt(row['mean_tokens'], 1)} | {_fmt(row['p95_tokens'], 1)} | {row['over_single_window']} | {100 * float(row['mean_retained_ratio']):.1f}% | {100 * float(row['min_retained_ratio']):.1f}% | {row['encoded_chunks']} |"
+        )
+    lines.extend(
+        [
+            "",
             "## Controller overhead",
             "",
             "| Component | Split | States | Seconds | ms/state | Notes |",
@@ -901,7 +1067,7 @@ def _write_report(
         lines.append(
             f"| {row['component']} | {row['split']} | {row['states']} | {_fmt(row['seconds'], 4)} | {_fmt(row['milliseconds_per_state'], 3)} | {row['notes']} |"
         )
-    full = selected_policy.get("A4 DARC full")
+    full = selected_policy.get("DARC Full")
     joint = selected_policy.get("Joint + Threshold")
     c3 = selected_policy.get("C3 Myopic")
     lines.extend(["", "## Evidence-based interpretation", ""])
@@ -918,7 +1084,7 @@ def _write_report(
     lines.extend(
         [
             "- Improvements in AUPRC without policy improvement would mean representation/ranking improved but conservative admission or calibration remains limiting.",
-            "- Attention gains are empirical only if A2 beats A1; the architecture does not assume downstream attention must help.",
+            "- Downstream attention is meaningful only if A3 beats both A1 (no downstream module) and A2 (checkpoint-only capacity control); the architecture does not assume attention must help.",
             "- The frozen test was already consumed by the preceding C3/failure-analysis work. DARC does not tune on it, but its results remain exploratory because the method was motivated after inspecting that test. A newly frozen holdout is required for confirmation.",
             "",
             "## Failure analysis and next steps",
@@ -932,11 +1098,13 @@ def _write_report(
             "",
             "- `selection_manifest.json`: immutable validation-selected specification before test loading.",
             "- `tables/model_selection.csv`: loss candidate selection.",
+            "- `tables/training_history.csv`: per-member epoch losses, validation NLL, best epoch, and early-stopping state.",
             "- `tables/validation_policy_grid.csv`: conservative margin/beta/cost search.",
             "- `tables/prediction_metrics.csv`: validation/test metrics by dataset/checkpoint.",
             "- `tables/policy_results.csv`: DARC and existing baseline budget frontiers.",
             "- `tables/darc_full_decision_trace.csv`: decision-level audit.",
             "- `tables/darc_full_failure_summary.csv`: Helpful/Harmful/wasted/missed error counts.",
+            "- `tables/semantic_coverage.csv`: per-field token lengths, chunk counts, and retained coverage.",
             "- `figures/`: PNG/PDF paper-ready figures.",
         ]
     )
@@ -966,6 +1134,15 @@ def run_darc(
         "validation": validation_examples,
     }
     _assert_disjoint(partitions)
+    hard_call_token_cap = int(config["evaluation"]["hard_call_token_cap"])
+    _assert_hard_call_cap(
+        train_examples, split="train", hard_call_token_cap=hard_call_token_cap
+    )
+    _assert_hard_call_cap(
+        validation_examples,
+        split="validation",
+        hard_call_token_cap=hard_call_token_cap,
+    )
     train_encoded, train_cache = encode_or_load(
         train_examples,
         split="train",
@@ -987,6 +1164,7 @@ def run_darc(
         output,
         resume=resume,
     )
+    training_history = _training_history_rows(registry)
     validation_predictions = {
         name: entry["model"].predict(
             validation_encoded, device_name=str(config["semantic_encoder"].get("device", "auto"))
@@ -1011,7 +1189,7 @@ def run_darc(
                 "temperature": entry["temperature"],
                 "policy": entry["policy"],
                 "loss_mode": entry["model"].loss_mode,
-                "use_attention": entry["model"].use_attention,
+                "downstream_mode": entry["model"].downstream_mode,
             }
             for name, entry in registry.items()
         },
@@ -1024,6 +1202,9 @@ def run_darc(
     test_examples, test_groups = _load_split(frozen_root, "test")
     partitions["test"] = test_examples
     _assert_disjoint(partitions)
+    _assert_hard_call_cap(
+        test_examples, split="test", hard_call_token_cap=hard_call_token_cap
+    )
     if hashlib.sha256(selection_path.read_bytes()).hexdigest() != selection_sha:
         raise AssertionError("DARC selection changed after test loading")
     test_encoded, test_cache = encode_or_load(
@@ -1065,23 +1246,41 @@ def run_darc(
         *_calibration_bins("test", test_examples, test_predictions["darc_full"], bins),
     ]
     split_rows = _split_rows(partitions)
+    cache_manifests = {
+        "train": train_cache,
+        "validation": validation_cache,
+        "test": test_cache,
+    }
+    coverage_rows = _coverage_rows(cache_manifests)
     overhead_rows: list[dict[str, Any]] = []
     for split, examples, cache in (
         ("train", train_examples, train_cache),
         ("validation", validation_examples, validation_cache),
         ("test", test_examples, test_cache),
     ):
-        seconds = float(cache.get("build_seconds", 0.0))
+        cold_seconds = float(cache.get("build_seconds", 0.0))
         overhead_rows.append(
             {
-                "component": f"Frozen encoder ({'cache hit' if cache.get('cache_hit') else 'cache build'})",
+                "component": "Frozen encoder cold build",
                 "split": split,
                 "states": len(examples),
-                "seconds": seconds,
-                "milliseconds_per_state": 1000.0 * seconds / max(len(examples), 1),
-                "notes": "One-time semantic embedding; cached by encoder+state fingerprint",
+                "seconds": cold_seconds,
+                "milliseconds_per_state": 1000.0 * cold_seconds / max(len(examples), 1),
+                "notes": "Measured when cache was created; includes model load, tokenization and all chunks",
             }
         )
+        if cache.get("cache_hit"):
+            warm_seconds = float(cache.get("cache_load_seconds", 0.0))
+            overhead_rows.append(
+                {
+                    "component": "Frozen encoder cache load",
+                    "split": split,
+                    "states": len(examples),
+                    "seconds": warm_seconds,
+                    "milliseconds_per_state": 1000.0 * warm_seconds / max(len(examples), 1),
+                    "notes": "Current-run NPZ load; no encoder forward pass",
+                }
+            )
     for name, prediction in test_predictions.items():
         seconds = float(prediction.latency_seconds)
         overhead_rows.append(
@@ -1102,6 +1301,7 @@ def run_darc(
 
     _write_csv(output / "tables" / "dataset_audit.csv", split_rows)
     _write_csv(output / "tables" / "model_selection.csv", model_selection)
+    _write_csv(output / "tables" / "training_history.csv", training_history)
     _write_csv(output / "tables" / "temperature_grid.csv", temperature_rows)
     _write_csv(output / "tables" / "prediction_metrics.csv", metric_rows)
     _write_csv(output / "tables" / "policy_results.csv", policy_rows)
@@ -1109,6 +1309,7 @@ def run_darc(
     _write_csv(output / "tables" / "darc_full_failure_summary.csv", failure_rows)
     _write_csv(output / "tables" / "calibration_bins.csv", calibration_bins)
     _write_csv(output / "tables" / "controller_overhead.csv", overhead_rows)
+    _write_csv(output / "tables" / "semantic_coverage.csv", coverage_rows)
     _make_figures(output, metric_rows, policy_rows, calibration_bins)
     report = _write_report(
         output,
@@ -1119,6 +1320,7 @@ def run_darc(
         registry,
         overhead_rows,
         failure_rows,
+        coverage_rows,
     )
     manifest = {
         "schema_version": "darc-v0.1-experiment-v1",
