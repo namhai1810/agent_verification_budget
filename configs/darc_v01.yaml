@@ -1,0 +1,96 @@
+schema_version: darc-v0.1-config-v1
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  baseline_results: results/cbv_v01_experiments_29102026
+
+output:
+  root: results/darc_v01_29102026
+
+reproducibility:
+  seed: 20261029
+  deterministic_torch: true
+  bootstrap_repetitions: 5000
+
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  batch_size: 32
+  device: auto
+  local_files_only: false
+  normalize: true
+  cache_dir: results/darc_v01_29102026/embedding_cache
+
+model:
+  hidden_dim: 128
+  attention_heads: 4
+  dropout: 0.15
+  ensemble_members: 3
+  epochs: 160
+  patience: 20
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  cost_loss_weight: 0.25
+  cost_quantile: 0.90
+  cost_quantile_weight: 0.20
+  ranking_loss_weight: 0.25
+  ranking_margin: 0.10
+  focal_gamma: 2.0
+  class_weight_beta: 0.999
+  gradient_clip_norm: 5.0
+
+ablations:
+  - name: semantic_no_attention
+    display_name: A1 Semantic encoder
+    downstream_attention: false
+    loss_candidates: [natural_ce]
+    paired_ranking: false
+    calibrate: false
+    conservative: false
+  - name: semantic_attention
+    display_name: A2 + downstream attention
+    downstream_attention: true
+    loss_candidates: [natural_ce]
+    paired_ranking: false
+    calibrate: false
+    conservative: false
+  - name: counterfactual_advantage
+    display_name: A3 + counterfactual advantage
+    downstream_attention: true
+    loss_candidates: [balanced_ce, focal]
+    paired_ranking: true
+    calibrate: false
+    conservative: false
+  - name: darc_full
+    display_name: A4 DARC full
+    reuse_model_from: counterfactual_advantage
+    downstream_attention: true
+    paired_ranking: true
+    calibrate: true
+    conservative: true
+
+calibration:
+  temperature_grid: [0.50, 0.67, 0.75, 1.0, 1.25, 1.50, 2.0, 3.0]
+  uncertainty_beta_grid: [0.0, 0.5, 1.0, 1.5, 2.0]
+  margin_grid: [0.0, 0.01, 0.02, 0.03, 0.05, 0.075, 0.10, 0.15, 0.20]
+  cost_admission_grid: [expected, upper]
+  budget_fractions: [0.0, 0.25, 0.50, 0.75, 1.0]
+  ece_bins: 10
+
+evaluation:
+  protocol: A-single
+  max_teacher_calls_per_task: 1
+  train_mode: combined
+  scopes: [combined, humaneval, livecodebench, bigcodebench]
+  baseline_policies:
+    - Joint + Threshold
+    - Separate + Threshold
+    - Legacy Compact Boosting
+    - C3 Myopic
+    - Never Verify
+    - Always CP1
+    - Always CP2
+    - Always CP3
+    - Random Checkpoint
+    - Offline Oracle

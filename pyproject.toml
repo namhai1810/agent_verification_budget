@@ -26,6 +26,11 @@ dev = [
   "pytest-cov==7.0.0",
   "ruff==0.14.2",
 ]
+darc = [
+  "torch>=2.3,<3",
+  "transformers>=4.45,<6",
+  "safetensors>=0.4,<1",
+]
 
 [project.scripts]
 agent-verify = "agent_verify.cli:main"
@@ -52,3 +57,6 @@ select = ["E", "F", "I", "UP", "B"]
 "src/agent_verify/analysis/phase2_data.py" = ["E501"]
 "src/agent_verify/analysis/phase2_models.py" = ["E501"]
 "src/agent_verify/analysis/phase3_training.py" = ["E501"]
+"src/agent_verify/analysis/darc_data.py" = ["E501"]
+"src/agent_verify/analysis/darc_model.py" = ["E501"]
+"src/agent_verify/analysis/darc_experiment.py" = ["E501"]

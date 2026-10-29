@@ -1,5 +1,7 @@
 # Generated/pinned for Python 3.10. Install the project itself with:
-#   python -m pip install -e '.[dev]'
+#   python -m pip install -e '.[dev,darc]'
+# DARC's GPU/semantic-encoder stack is declared in the `darc` optional extra in
+# pyproject.toml so pip can select the CUDA-compatible PyTorch wheel for this host.
 datasets==4.2.0
 httpx==0.28.1
 matplotlib==3.10.7
