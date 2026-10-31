@@ -1,0 +1,122 @@
+schema_version: darc-v0.5-offline-rl-config-v2
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  darc_v04_audit: results/darc_v04_audit_31102026
+  c3_results: results/cbv_v01_experiments_29102026
+
+output:
+  # Keep the previous buggy run immutable for audit/reproducibility.
+  root: results/darc_v05_offline_rl_budgetfix_31102026
+
+reproducibility:
+  seeds: [20261031, 20261101, 20261117]
+  crossfit_seed: 20260501
+  deterministic_torch: true
+  bootstrap_repetitions: 5000
+  permutation_repetitions: 10000
+
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  chunk_stride: 480
+  max_chunks_per_text: 5
+  batch_size: 32
+  device: auto
+  local_files_only: true
+  normalize: true
+  cache_dir: results/darc_v05_offline_rl/embedding_cache
+
+offline_rl:
+  policy_iterations: 2
+  crossfit_folds: 3
+  members_per_fold: 1
+  budget_fractions: [0.0, 0.25, 0.5, 0.75, 1.0]
+  hard_call_token_cap: 8192
+  budget_semantics:
+    global_remaining_budget: strict_actual_token_ledger
+    per_task_allowance: observable_shadow_allocation
+    hard_call_reserve_scope: global_ledger_only
+    positive_allowance_verify_target: always_supervised
+
+model:
+  hidden_dim: 128
+  attention_heads: 4
+  dropout: 0.15
+  epochs: 60
+  patience: 10
+  batch_size: 512
+  learning_rate: 0.0007
+  weight_decay: 0.0001
+  q_success_loss_weight: 1.0
+  q_cost_loss_weight: 0.35
+  immediate_cost_loss_weight: 0.15
+  effect_loss_weight: 0.25
+  focal_gamma: 2.0
+  class_weight_beta: 0.999
+  gradient_clip_norm: 5.0
+
+policy_grid:
+  base_token_price: [0.0, 0.01, 0.03]
+  price_elasticity: [0.5, 1.0]
+  advantage_uncertainty_beta: [0.0, 0.5, 1.0]
+  cost_uncertainty_beta: [0.0, 0.5]
+  harmful_weight: [0.0, 1.0]
+  decision_margin: [0.0, 0.01, 0.02]
+
+selection:
+  reference_variant: conservative_dynamic
+  token_utilization_penalty: 0.005
+  max_harmful_rate: 0.05
+  harmful_rate_tolerance_over_reference: 0.01
+
+variants:
+  - name: conservative_dynamic
+    display_name: DARC v0.5 Conservative Dynamic
+    target_mode: policy_aware
+    conservative: true
+    dynamic_token_price: true
+    uncertainty_penalty: true
+  - name: myopic_targets
+    display_name: Myopic Targets
+    target_mode: myopic
+    conservative: true
+    dynamic_token_price: true
+    uncertainty_penalty: true
+  - name: non_conservative
+    display_name: No Conservative Penalty
+    target_mode: policy_aware
+    conservative: false
+    dynamic_token_price: true
+    uncertainty_penalty: false
+  - name: static_token_price
+    display_name: Static Token Price
+    target_mode: policy_aware
+    conservative: true
+    dynamic_token_price: false
+    uncertainty_penalty: true
+  - name: no_uncertainty
+    display_name: No Uncertainty Penalty
+    target_mode: policy_aware
+    conservative: true
+    dynamic_token_price: true
+    uncertainty_penalty: false
+
+evaluation:
+  partition: validation
+  frozen_test_access: forbidden
+  include_fixed_sequences: [SSS, VSS, SVS, SSV, VVS, VSV, SVV, VVV]
+
+monitoring:
+  tensorboard: true
+  csv_history: true
+  tqdm: true
+  mininterval_seconds: 1.0
+
+smoke:
+  tasks: 6
+  folds: 2
+  epochs: 2
+  policy_iterations: 1
+  members_per_fold: 1

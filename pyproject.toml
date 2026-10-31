@@ -32,6 +32,7 @@ darc = [
   # semantic encoder on the stable v4 API until a separate migration audit.
   "transformers>=4.45,<5",
   "safetensors>=0.4,<1",
+  "tensorboard>=2.18,<3",
 ]
 
 [project.scripts]

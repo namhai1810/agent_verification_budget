@@ -1968,3 +1968,172 @@ Frozen-test artifacts:
 - [Paired policy comparison](../results/darc_v03_30102026/test_evaluation/tables/paired_policy_comparison.csv)
 - [Budget-matched comparison](../results/darc_v03_30102026/test_evaluation/tables/budget_matched_comparison.csv)
 - [Locked test runner](../scripts/run_darc_v03_locked_test.sh)
+
+## 30. DARC v0.5 — Conservative Budget-Aware Offline RL sau budget-state fix
+
+DARC v0.5 mở rộng DARC v0.4 từ một predictor giá trị tức thời thành controller
+offline-RL hữu hạn ba checkpoint. Thí nghiệm này chỉ dùng **381 train tasks** và
+**98 validation tasks** có đủ tám nhánh Level-2; frozen test không được load,
+Student/Teacher không được gọi lại và mọi outcome/cost đều đến từ CBV replay đã lưu.
+
+> **Kết luận validation:** `myopic_targets@i0` là development candidate. Nó đạt
+> cùng **52.04% accuracy** với C3 Myopic/Continuation nhưng chỉ dùng **186,867
+> Teacher tokens**, ít hơn khoảng **46–48%**. Đây là bằng chứng về efficiency trên
+> validation, chưa phải bằng chứng DARC có raw accuracy hoặc test generalization
+> tốt hơn C3.
+
+### 30.1. Model flow và thay đổi budget semantics
+
+![DARC v0.5 model and budget flow](../results/darc_v05_offline_rl_budgetfix_31102026/figures/darc_v05_budget_semantics_flow.png)
+
+*Hình 30.1 — DARC v0.5 chỉ encode state quan sát được. Per-task allowance đi vào
+budget-conditioned value model và dynamic token price; strict action gate dùng
+global remaining budget. Actual future cost/outcome chỉ xuất hiện sau action hoặc
+trong offline target, không phải inference feature.*
+
+Ba đại lượng trước đây dễ bị nhập nhằng nay được tách rõ:
+
+| Đại lượng | Vai trò | Có quyết định hard feasibility? |
+|---|---|---:|
+| `global_remaining_budget` | Ledger actual Teacher tokens chung cho toàn replay | **Có** |
+| `per_task_allowance` | Allocation/shadow price và budget-conditioning feature | Không |
+| `hard_call_token_cap = 8192` | Reserve bảo thủ cho một Teacher call | Có, nhưng chỉ so với global ledger |
+
+Bug cũ so trực tiếp các training allowances `[0, 1228, 2456, 3684, 4912]` với
+reserve `8192`, khiến mọi Verify target bị mask. Sau sửa, allowance dương luôn có
+forced-Verify supervision; allowance 0 vẫn mask Verify đúng chủ đích. Online replay
+chỉ admit Verify nếu global ledger còn reserve và predicted call cost fit; actual cost
+được charge sau khi action đã cố định, nên không dùng future realized cost để chọn.
+
+### 30.2. Input và representation
+
+Mỗi observable shared-prefix state tạo một training example. Train có
+`381 × 7 = 2,667` states; validation có `98 × 7 = 686` states, tương ứng prefix
+`START, S, V, SS, SV, VS, VV`.
+
+| Input block | Nội dung | Cách encode |
+|---|---|---|
+| Semantic task state | Problem/task, current artifact, preceding artifacts/history | Frozen UniXcoder, chunk cache |
+| Workflow context | Current checkpoint/role và downstream agent roles/dependencies | Segment projection + downstream multi-head attention |
+| Metadata | Dataset/checkpoint và observable structural features | Standardized numeric vector |
+| Action prefix | Tối đa hai action trước: padding/Skip/Verify = `0/1/2` | Learned action embedding |
+| Budget condition | Allowance fraction, log-normalized allowance, clipped relative allowance | 3-D budget projection |
+
+`global_remaining_budget` không được trộn vào semantic network như một proxy cho
+future outcome. Nó được controller đọc ở strict feasibility gate. Model cũng không
+nhận future artifact, actual future Teacher cost, final correctness hay oracle-best
+descendant làm input.
+
+### 30.3. Output heads, target và loss
+
+Shared trunk có bốn output heads:
+
+| Output | Kích thước | Ý nghĩa |
+|---|---:|---|
+| `Q_success(S), Q_success(V)` | 2 | Xác suất final correctness nếu chọn action rồi theo continuation policy |
+| `Q_cost(S), Q_cost(V)` | 2 | Cumulative downstream Teacher tokens của trajectory tương ứng |
+| `P(Harmful, No-change, Helpful)` | 3 | Risk/effect class của Verify so với Skip |
+| `immediate_verify_cost` | 1 | Predicted token cost của Teacher call hiện tại |
+
+Ensemble tạo thêm:
+
+```text
+advantage             = Q_success(V) - Q_success(S)
+advantage_uncertainty = std_member(advantage)
+additional_cost       = max(Q_cost(V) - Q_cost(S), 0)
+```
+
+Training objective kết hợp masked BCE cho `Q_success`, Smooth-L1 cho cumulative và
+immediate log-cost, cùng class-balanced focal CE cho effect class. Gradient được
+clip; checkpoint chọn bằng validation Q-success/Q-cost loss. Cross-fitting theo task
+ngăn target task đi vào continuation model dùng để tạo target cho chính nó.
+
+Q-target không lấy `max` trên các future descendants. Với từng state và allowance,
+pipeline force Skip hoặc Verify, sau đó đi đúng một observable continuation policy:
+
+```text
+policy-aware target: forced action → learned/fixed continuation → recorded terminal outcome
+myopic target:       forced action → Skip mọi checkpoint còn lại → recorded terminal outcome
+```
+
+Candidate được chọn là **myopic iteration 0**. Iteration 1/continuation không cải
+thiện accuracy–cost trade-off, cho thấy bootstrapped future value hiện vẫn thêm nhiễu
+hơn giá trị.
+
+### 30.4. Verify-target coverage sau sửa lỗi
+
+| Split | Positive-budget rows | Verify-supervised | Coverage |
+|---|---:|---:|---:|
+| Train, mỗi variant/seed/iteration | 10,668 | 10,668 | **100%** |
+| Validation, mỗi variant/seed/iteration | 2,744 | 2,744 | **100%** |
+| Allowance = 0 | — | 0 | Mask đúng chủ đích |
+
+Pipeline nay fail-fast trước epoch đầu nếu bất kỳ allowance dương nào có toàn bộ
+Verify targets bị mask. Mọi validation replay đều có `max_budget_overshoot = 0`.
+
+### 30.5. Accuracy–cost result
+
+![DARC v0.5 validation efficiency](../results/darc_v05_offline_rl_budgetfix_31102026/figures/darc_v05_efficiency_summary.png)
+
+*Hình 30.2 — Panel (a) là matched-budget validation frontier; panel (b) so actual
+Teacher tokens tại operating point đầy đủ. DARC được highlight vì đạt cùng 52.04%
+với C3 ở chi phí thấp hơn, không phải vì raw accuracy cao hơn.*
+
+| Policy | Accuracy (95% task bootstrap CI) | Actual tokens | Calls | Helpful / Harmful / No-change |
+|---|---:|---:|---:|---:|
+| **DARC v0.5 Myopic i0** | **52.04% [41.84, 62.24]** | **186,867** | **116.3** | 5.3 / 0.3 / 110.7 |
+| DARC v0.4 Myopic | 51.70% [41.84, 61.56] | 203,929 | 121.0 | 4.7 / 0.0 / 116.3 |
+| C3 MultiHistory Continuation | **52.04% [41.84, 62.24]** | 345,349 | 206.0 | 6.0 / 1.0 / 199.0 |
+| C3 MultiHistory Myopic | **52.04% [41.84, 62.24]** | 357,291 | 211.0 | 5.0 / 0.0 / 206.0 |
+| Always VVV | 51.70% [41.84, 61.56] | 473,895 | 267.7 | 5.3 / 0.7 / 261.7 |
+| Never Verify | 46.94% [36.73, 57.14] | 0 | 0 | 0 / 0 / 0 |
+
+Matched budget cho thấy DARC đạt plateau sớm hơn:
+
+| Budget grid | DARC v0.5 Myopic i0 | C3 Myopic | C3 Continuation |
+|---:|---:|---:|---:|
+| 25% | **51.36% / 108K** | 48.64% / 113K | 48.64% / 113K |
+| 50% | **52.04% / 169K** | 50.68% / 234K | 51.02% / 233K |
+| 75% | **52.04% / 181K** | 52.04% / 353K | 52.04% / 345K |
+| 100% | **52.04% / 187K** | 52.04% / 357K | 52.04% / 345K |
+
+Tại full budget, DARC giảm `170,424` tokens so với C3 Myopic (**47.7%**) và
+`158,482` tokens so với C3 Continuation (**45.9%**) trong khi task-level outcomes
+giống hệt C3 trên cả 98 validation tasks. Do đó paired accuracy difference là
+`0.00 pp`, không phải accuracy win.
+
+So với DARC v0.4 Myopic, v0.5 tăng `+0.34 pp` và giảm `17,062` tokens, nhưng chỉ có
+`1 win / 0 loss / 97 ties`, paired permutation `p = 1.0`; không có statistical
+evidence rằng raw accuracy đã tăng.
+
+### 30.6. Training dynamics, insight và giới hạn
+
+![DARC v0.5 training curves](../results/darc_v05_offline_rl_budgetfix_31102026/figures/training_loss.png)
+
+Các insight chính:
+
+1. **Budget-state fix có hiệu lực:** Verify targets không còn biến mất và strict
+   actual-token budget không bị overshoot.
+2. **Contribution mạnh nhất hiện tại là efficiency:** cùng validation accuracy với
+   C3 nhưng giảm gần một nửa Teacher tokens/calls.
+3. **Myopic vẫn thắng continuation:** policy iteration 1 không tạo thêm accuracy;
+   learned future value hiện chưa đủ ổn định để biện minh cho bootstrapping sâu hơn.
+4. **No-change vẫn thống trị:** `110.7/116.3 ≈ 95.2%` DARC calls không đổi final
+   correctness. Helpful precision khoảng 4.6%, tốt hơn C3 nhưng vẫn thấp.
+5. **Seed stability còn yếu:** ba seeds dùng khoảng `109K`, `209K`, `243K` tokens
+   nhưng đều đạt 52.04%. Policy tìm được cùng outcome với call volume rất khác nhau.
+6. **CI còn rộng:** validation chỉ có 98 tasks và model/policy selection cùng dùng
+   validation. Không được gọi đây là confirmatory superiority hoặc test result.
+
+Hướng tiếp theo hợp lý là giữ candidate `myopic_targets@i0`, cải thiện seed-stable
+Helpful ranking và giảm No-change calls trước khi mở frozen/external test. Không nên
+tăng số policy iterations chỉ vì model đã có continuation head.
+
+Artifacts tái lập:
+
+- [DARC v0.5 validation report](../results/darc_v05_offline_rl_budgetfix_31102026/report/darc_v05_offline_rl_report.md)
+- [Target coverage audit](../results/darc_v05_offline_rl_budgetfix_31102026/tables/target_coverage.csv)
+- [Aggregate results](../results/darc_v05_offline_rl_budgetfix_31102026/tables/aggregate_results.csv)
+- [Paired comparisons](../results/darc_v05_offline_rl_budgetfix_31102026/tables/paired_comparisons.csv)
+- [Selection manifest](../results/darc_v05_offline_rl_budgetfix_31102026/selection_manifest.json)
+- [Figure generator](../scripts/plot_darc_v05_budgetfix_report.py)
