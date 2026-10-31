@@ -307,6 +307,73 @@ def _tune_policy(
     return chosen[1], rows
 
 
+def select_development_candidate(
+    candidates: list[dict[str, Any]],
+    *,
+    reference_variant: str,
+    token_utilization_penalty: float,
+    max_harmful_rate: float,
+    harmful_rate_tolerance_over_reference: float,
+) -> tuple[str, list[dict[str, Any]]]:
+    """Select a validation candidate without privileging the Full model.
+
+    Full is used only to define a relative harmful-rate ceiling.  Selection is
+    otherwise based on a predeclared accuracy--actual-token efficiency score.
+    """
+
+    if not candidates:
+        raise ValueError("No development candidates were provided")
+    by_name = {str(row["variant"]): dict(row) for row in candidates}
+    if reference_variant not in by_name:
+        raise ValueError(f"Missing reference variant {reference_variant!r}")
+
+    def harmful_rate(row: dict[str, Any]) -> float:
+        return float(row["harmful_actions"]) / max(float(row["calls"]), 1.0)
+
+    reference_harmful = harmful_rate(by_name[reference_variant])
+    harmful_ceiling = min(
+        float(max_harmful_rate),
+        reference_harmful + float(harmful_rate_tolerance_over_reference),
+    )
+    audited: list[dict[str, Any]] = []
+    for source in candidates:
+        row = dict(source)
+        utilization = float(row["actual_tokens"]) / max(float(row["token_budget"]), 1.0)
+        risk = harmful_rate(row)
+        row.update(
+            {
+                "reference_variant": reference_variant,
+                "harmful_rate": risk,
+                "harmful_rate_ceiling": harmful_ceiling,
+                "token_utilization": utilization,
+                "selection_score": float(row["mean_accuracy"])
+                - float(token_utilization_penalty) * utilization,
+                "risk_eligible": risk <= harmful_ceiling + 1e-12,
+                "is_reference": str(row["variant"]) == reference_variant,
+            }
+        )
+        audited.append(row)
+    eligible = [row for row in audited if bool(row["risk_eligible"])]
+    if not eligible:
+        # Deterministic conservative fallback; surfaced in the audit table.
+        minimum = min(float(row["harmful_rate"]) for row in audited)
+        eligible = [row for row in audited if float(row["harmful_rate"]) == minimum]
+        for row in eligible:
+            row["risk_fallback"] = True
+    selected = max(
+        eligible,
+        key=lambda row: (
+            float(row["selection_score"]),
+            float(row["mean_accuracy"]),
+            -float(row["actual_tokens"]),
+            str(row["variant"]),
+        ),
+    )
+    for row in audited:
+        row["selected"] = str(row["variant"]) == str(selected["variant"])
+    return str(selected["variant"]), audited
+
+
 def _effect_metrics(
     states: list[MultiHistoryState], prediction: V04Prediction
 ) -> dict[str, float]:
@@ -822,6 +889,7 @@ def run(config_path: Path) -> Path:
         Path(config["data"]["darc_v03_results"]) / "models" / "darc_v03_selected.pt"
     )
     variants: dict[str, dict[str, Any]] = {}
+    development_candidates: list[dict[str, Any]] = []
     policy_selection_rows: list[dict[str, Any]] = []
     metric_rows: list[dict[str, Any]] = []
     training_rows: list[dict[str, Any]] = []
@@ -881,6 +949,29 @@ def run(config_path: Path) -> Path:
         )
         policy_selection_rows.extend(selection)
         variants[name] = {"model": model, "policy": policy, "predictions": predictions}
+        policy_fields = asdict(policy)
+        chosen_policy_row = next(
+            row
+            for row in selection
+            if all(float(row[key]) == float(value) for key, value in policy_fields.items())
+        )
+        nonzero_fractions = max(sum(float(value) > 0 for value in fractions), 1)
+        total_budget = sum(
+            int(round(fraction * reference_budget * len(validation_groups)))
+            for fraction in fractions
+            if fraction > 0
+        )
+        development_candidates.append(
+            {
+                "variant": name,
+                "mean_accuracy": float(chosen_policy_row["mean_validation_accuracy"]),
+                "harmful_actions": int(chosen_policy_row["validation_harmful_actions"]),
+                "actual_tokens": int(chosen_policy_row["validation_tokens"]),
+                "calls": int(chosen_policy_row["validation_calls"]),
+                "token_budget": total_budget,
+                "evaluated_budget_points": nonzero_fractions,
+            }
+        )
         full_prediction = predictions[-1]
         metric_rows.append(
             {"variant": name, "split": "validation", **_effect_metrics(validation_states, full_prediction)}
@@ -889,13 +980,25 @@ def run(config_path: Path) -> Path:
             for row in member.history:
                 training_rows.append({"variant": name, "member": member_index, **row})
 
-    selected_variant = "full_pretrained"
+    selection_config = config["selection"]
+    selected_variant, candidate_audit = select_development_candidate(
+        development_candidates,
+        reference_variant=str(selection_config["reference_variant"]),
+        token_utilization_penalty=float(selection_config["token_utilization_penalty"]),
+        max_harmful_rate=float(selection_config["max_harmful_rate"]),
+        harmful_rate_tolerance_over_reference=float(
+            selection_config["harmful_rate_tolerance_over_reference"]
+        ),
+    )
     selected_policy: SequentialPolicy = variants[selected_variant]["policy"]
     selection_manifest = {
         "schema_version": "darc-v0.4-selection-v1",
         "test_loaded": False,
         "selection_source": "train plus validation only",
         "selected_variant": selected_variant,
+        "reference_variant": str(selection_config["reference_variant"]),
+        "selection_criteria": dict(selection_config),
+        "candidate_audit": candidate_audit,
         "selected_policy": asdict(selected_policy),
         "reference_budget_per_task": reference_budget,
         "allowance_buckets": allowances,

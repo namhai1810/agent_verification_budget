@@ -1,0 +1,108 @@
+schema_version: darc-v0.4-audit-config-v1
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  c3_results: results/cbv_v01_experiments_29102026
+  darc_v03_results: results/darc_v03_30102026
+
+output:
+  root: results/darc_v04_audit_31102026
+
+reproducibility:
+  # Every ablation receives exactly these seeds.  A seed controls ensemble task
+  # subsampling, initialization, minibatch order and validation replay order.
+  seeds: [20261031, 20261101, 20261117]
+  deterministic_torch: true
+  bootstrap_repetitions: 5000
+  permutation_repetitions: 10000
+
+progress:
+  enabled: true
+  mininterval_seconds: 1.0
+  leave_epoch_bars: false
+
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  chunk_stride: 480
+  max_chunks_per_text: 5
+  batch_size: 32
+  device: auto
+  local_files_only: true
+  normalize: true
+  cache_dir: results/darc_v04_audit_31102026/embedding_cache
+
+model:
+  hidden_dim: 128
+  attention_heads: 4
+  dropout: 0.15
+  ensemble_members: 3
+  ensemble_task_fraction: 0.90
+  epochs: 80
+  patience: 12
+  batch_size: 512
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  q_loss_weight: 1.0
+  effect_loss_weight: 0.35
+  cost_loss_weight: 0.20
+  focal_gamma: 2.0
+  class_weight_beta: 0.999
+  gradient_clip_norm: 5.0
+
+targets:
+  budget_fractions: [0.0, 0.25, 0.5, 0.75, 1.0]
+
+variants:
+  - name: full_pretrained
+    display_name: Full (reference)
+    pretrained: true
+    use_history: true
+    counterfactual_targets: true
+    budget_conditioning: true
+  - name: full_scratch
+    display_name: Scratch
+    pretrained: false
+    use_history: true
+    counterfactual_targets: true
+    budget_conditioning: true
+  - name: no_history
+    display_name: No History
+    pretrained: true
+    use_history: false
+    counterfactual_targets: true
+    budget_conditioning: true
+  - name: myopic_targets
+    display_name: Myopic Targets
+    pretrained: true
+    use_history: true
+    counterfactual_targets: false
+    budget_conditioning: true
+  - name: no_budget_conditioning
+    display_name: No Budget Conditioning
+    pretrained: true
+    use_history: true
+    counterfactual_targets: true
+    budget_conditioning: false
+
+policy_grid:
+  harmful_weight: [0.0, 1.0, 2.0]
+  uncertainty_beta: [0.0, 0.5]
+  cost_lambda: [0.0, 0.02, 0.05]
+  decision_margin: [0.0, 0.02, 0.05]
+
+selection:
+  reference_variant: full_pretrained
+  # 0.005 means a candidate using 100% of the available budget pays a
+  # 0.5-percentage-point accuracy-equivalent penalty.
+  token_utilization_penalty: 0.005
+  max_harmful_rate: 0.05
+  harmful_rate_tolerance_over_reference: 0.01
+
+evaluation:
+  budget_fractions: [0.0, 0.25, 0.5, 0.75, 1.0]
+  hard_call_token_cap: 8192
+  partition: validation
+  frozen_test_access: forbidden
+
