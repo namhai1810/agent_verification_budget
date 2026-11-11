@@ -2129,6 +2129,39 @@ Hướng tiếp theo hợp lý là giữ candidate `myopic_targets@i0`, cải th
 Helpful ranking và giảm No-change calls trước khi mở frozen/external test. Không nên
 tăng số policy iterations chỉ vì model đã có continuation head.
 
+### 30.7. Single-Verify-constrained replay
+
+Audit mới replay lại đúng policy DARC v0.5 Myopic iteration 0 trên cùng 98 validation
+tasks và ba seeds. Sau Verify đầu tiên, mọi Verify proposal tiếp theo bị force thành
+Skip; environment vẫn đi theo đúng branch artifact mới. Không retrain và không dùng
+frozen test.
+
+![Single-Verify accuracy–token frontier](../results/darc_v05_offline_rl/single_verify_audit/figures/accuracy_token_frontier.png)
+
+| Budget cap | DARC unrestricted | DARC Single-Verify | Token giảm | Accuracy delta |
+|---:|---:|---:|---:|---:|
+| 120K | **51.36% / 107.7K** | 50.34% / **77.7K** | 27.8% | -1.02 pp |
+| 240K | **52.04% / 168.8K** | 50.34% / **83.7K** | 50.4% | -1.70 pp |
+| 361K | **52.04% / 180.9K** | 50.34% / **84.9K** | 53.1% | -1.70 pp |
+| 481K | **52.04% / 186.9K** | 50.34% / **88.1K** | 52.9% | -1.70 pp |
+
+Single-Verify loại được khoảng một nửa Teacher tokens/calls nhưng chưa giữ nguyên
+accuracy. Paired CI của chênh lệch accuracy vẫn chạm 0, vì vậy chưa có statistical
+evidence rõ rằng constraint làm giảm accuracy; quan sát thực tế tương ứng chỉ 1–2
+task tùy seed. Hai loss cases là `HumanEval/142` và `LiveCodeBench/3736`: policy
+Verify quá sớm tại CP1 (`VVV → VSS`), trong khi `SVS`, hoặc `SSV`, đã đủ giải đúng.
+Do đó failure không chứng minh cần Multi-Verify; nó cho thấy cần học **chọn đúng một
+checkpoint/Verify Now vs Wait**, thay vì chỉ áp hard cap sau Verify đầu tiên.
+
+Tại 240K, DARC unrestricted đạt 52.04% với 168.8K tokens; C3 chỉ đạt 50.68% với
+234.1K. Tại high budget, C3 cần khoảng 353–357K tokens để đạt cùng 52.04%, nên vẫn
+bị DARC unrestricted Pareto-dominated. Single-Verify là operating point rất tiết
+kiệm nhưng chấp nhận khoảng 1.70 pp accuracy loss.
+
+- [Single-Verify audit report](../results/darc_v05_offline_rl/single_verify_audit/report/darc_v05_single_verify_audit.md)
+- [Matched paired comparisons](../results/darc_v05_offline_rl/single_verify_audit/tables/paired_policy_comparisons.csv)
+- [Loss-case analysis](../results/darc_v05_offline_rl/single_verify_audit/tables/loss_case_analysis.csv)
+
 Artifacts tái lập:
 
 - [DARC v0.5 validation report](../results/darc_v05_offline_rl_budgetfix_31102026/report/darc_v05_offline_rl_report.md)
