@@ -11,13 +11,60 @@ TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
 CHILD_MEMORY_FRACTION="${CHILD_MEMORY_FRACTION:-0.23}"
 TEACHER_MEMORY_FRACTION="${TEACHER_MEMORY_FRACTION:-0.62}"
+COMBINED_MEMORY_FRACTION="${COMBINED_MEMORY_FRACTION:-0.85}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
+STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-600}"
 
 mkdir -p "${STATE_DIR}"
 
 usage() {
-  echo "Usage: bash scripts/start_vllm_gpu2.sh {start|status|stop|logs}"
+  echo "Usage: bash scripts/start_vllm_gpu2.sh {start|start-child|start-teacher|status|stop|logs}"
+}
+
+wait_for_api() {
+  local name="$1"
+  local port="$2"
+  local pid_file="${STATE_DIR}/${name}.pid"
+  local deadline=$((SECONDS + STARTUP_TIMEOUT_SECONDS))
+  echo "Waiting for ${name} API on port ${port} (timeout ${STARTUP_TIMEOUT_SECONDS}s)..."
+  while (( SECONDS < deadline )); do
+    if curl -fsS --max-time 2 "http://127.0.0.1:${port}/v1/models" >/dev/null 2>&1; then
+      echo "${name}: API ready"
+      return 0
+    fi
+    if [[ -f "${pid_file}" ]]; then
+      local pid
+      pid="$(<"${pid_file}")"
+      if [[ "${pid}" =~ ^[0-9]+$ ]] && ! kill -0 "${pid}" 2>/dev/null; then
+        echo "ERROR: ${name} exited during startup. Inspect ${STATE_DIR}/${name}.log" >&2
+        return 1
+      fi
+    fi
+    sleep 5
+  done
+  echo "ERROR: ${name} API did not become ready within ${STARTUP_TIMEOUT_SECONDS}s." >&2
+  return 1
+}
+
+start_child() {
+  local memory_fraction="$CHILD_MEMORY_FRACTION"
+  if port_is_open "$TEACHER_PORT"; then
+    # vLLM >=0.32 accounts memory already occupied by another process on the
+    # same GPU. The second process therefore needs the cumulative target.
+    memory_fraction="$COMBINED_MEMORY_FRACTION"
+  fi
+  start_server child "$CHILD_MODEL" "$CHILD_PORT" "$memory_fraction"
+  wait_for_api child "$CHILD_PORT"
+}
+
+start_teacher() {
+  local memory_fraction="$TEACHER_MEMORY_FRACTION"
+  if port_is_open "$CHILD_PORT"; then
+    memory_fraction="$COMBINED_MEMORY_FRACTION"
+  fi
+  start_server teacher "$TEACHER_MODEL" "$TEACHER_PORT" "$memory_fraction"
+  wait_for_api teacher "$TEACHER_PORT"
 }
 
 require_vllm() {
@@ -119,10 +166,26 @@ case "${action}" in
       echo "Run: bash scripts/start_vllm_gpu2.sh status" >&2
       exit 1
     fi
-    start_server child "${CHILD_MODEL}" "${CHILD_PORT}" "${CHILD_MEMORY_FRACTION}"
-    start_server teacher "${TEACHER_MODEL}" "${TEACHER_PORT}" "${TEACHER_MEMORY_FRACTION}"
-    echo "Both loaders were launched on physical GPU ${GPU_ID}. Model loading can take several minutes."
+    start_child
+    start_teacher
+    echo "Both loaders are ready on physical GPU ${GPU_ID}."
     echo "Monitor with: bash scripts/start_vllm_gpu2.sh logs"
+    ;;
+  start-child)
+    require_vllm
+    if port_is_open "${CHILD_PORT}"; then
+      echo "Port ${CHILD_PORT} is already in use; refusing to start child." >&2
+      exit 1
+    fi
+    start_child
+    ;;
+  start-teacher)
+    require_vllm
+    if port_is_open "${TEACHER_PORT}"; then
+      echo "Port ${TEACHER_PORT} is already in use; refusing to start teacher." >&2
+      exit 1
+    fi
+    start_teacher
     ;;
   status)
     show_server child "${CHILD_PORT}"

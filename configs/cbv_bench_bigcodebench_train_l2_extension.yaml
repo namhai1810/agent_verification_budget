@@ -1,0 +1,28 @@
+_base_: cbv_bench_bigcodebench_v2.yaml
+
+# Dedicated, train-only Level-2 extension. Runtime scripts override both paths
+# explicitly so an interrupted run can resume in the exact same directory.
+collection:
+  name: cbv_bench_bigcodebench_train_l2_extension_qwen25
+  level: 2
+  results_dir: results/cbv_train_l2_extension/collection
+  repeated_rollouts: 1
+  resume: true
+  retry_failed: false
+  reuse_legacy_level1: true
+  progress: true
+
+datasets:
+  - name: bigcodebench
+    enabled: true
+    version: v0.1.4
+    revision: b74c0d0bf70d2c0bc459be537895cca163007f1a
+    split: v0.1.4
+    selection_manifest: results/cbv_train_l2_extension/selection/bigcodebench_train_l2_extension.json
+    task_count: 150
+    task_offset: 0
+    # Read only the frozen TRAIN partition. Validation/test trajectory files are
+    # never opened. The importer reconstructs the deterministic L1 shared tree in
+    # the new run's cache and records its train-partition provenance.
+    existing_results_dirs:
+      - data/cbv_bench_v01_frozen_28102026/train

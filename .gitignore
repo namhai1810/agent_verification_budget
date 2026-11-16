@@ -55,8 +55,32 @@ results/darc_v05_offline_rl/single_verify_audit/*
 results/darc_v05_offline_rl/single_verify_audit/figures/*
 !results/darc_v05_offline_rl/single_verify_audit/figures/accuracy_token_frontier.png
 
+!results/cbv_train_l2_extension_12112026/
+results/cbv_train_l2_extension_12112026/*
+!results/cbv_train_l2_extension_12112026/combined_summary/
+results/cbv_train_l2_extension_12112026/combined_summary/*
+!results/cbv_train_l2_extension_12112026/combined_summary/figures/
+results/cbv_train_l2_extension_12112026/combined_summary/figures/*
+!results/cbv_train_l2_extension_12112026/combined_summary/figures/cbv_data_inventory_after_extension.png
+!results/cbv_train_l2_extension_12112026/combined_summary/figures/cbv_train_signal_after_extension.png
+
+!results/darc_v052_synergy_audit/
+results/darc_v052_synergy_audit/*
+!results/darc_v052_synergy_audit/figures/
+results/darc_v052_synergy_audit/figures/*
+!results/darc_v052_synergy_audit/figures/synergy_audit_summary.png
+
+!results/darc_v05_531_scaling/
+results/darc_v05_531_scaling/*
+!results/darc_v05_531_scaling/figures/
+results/darc_v05_531_scaling/figures/*
+!results/darc_v05_531_scaling/figures/accuracy_cost_pareto.png
+
 data/*
 !data/.gitkeep
 !data/HumanEval.jsonl.gz
 
 *.orig
+
+plot_*
+test_*

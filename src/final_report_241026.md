@@ -1206,14 +1206,16 @@ python scripts/analyze_cbv_level2_available.py \
   --output-dir results/cbv_bench_analysis_26102026
 ```
 
-## 27. Cập nhật cuối — CBV-Bench full-scale sau recovery
+## 27. CBV-Bench full-scale và train Level-2 extension
 
 Mục này **thay thế các con số pilot ở mục 26** khi sử dụng kết quả nghiên cứu về sau.
-Collection BigCodeBench đã hoàn thành sau recovery có audit trail và provenance; phân
-tích bên dưới chỉ đọc artifacts đã lưu, không gọi thêm Student/Teacher và không train
-model. Mọi so sánh accuracy đều được tính paired trên các task có đủ sequence yêu cầu.
+Các mục 27.1–27.8 lưu snapshot full-scale ngày 28/10/2026 để giữ provenance cho các
+phân tích đã chạy. **Mục 27.9 là inventory hiện hành** sau khi bổ sung 150 BigCodeBench
+train tasks Level 2 ngày 12/11/2026. Collection có audit trail và provenance; mọi phân
+tích chỉ đọc artifacts đã lưu, không train lại model. Các bảng outcome mới trong 27.9
+chỉ dùng train trajectories; validation và frozen-test outcomes không được mở.
 
-### 27.1. Dataset đã xây dựng được
+### 27.1. Snapshot full-scale trước train extension (28/10/2026)
 
 ![CBV-Bench coverage theo level](../results/cbv_bench_all_28102026/figures/dataset_level_coverage.png)
 
@@ -1467,6 +1469,196 @@ Vì vậy contribution phù hợp nhất của benchmark không chỉ là “th�
 cung cấp **paired counterfactual trajectories + measured Teacher cost + multi-checkpoint
 histories** để đánh giá chính xác policy phân bổ verification budget. Claim mạnh hơn về
 generalization nên được dành cho vòng cross-model/repeated-rollout tiếp theo.
+
+### 27.9. Inventory hiện hành sau BigCodeBench train Level-2 extension (12/11/2026)
+
+Extension mới chọn outcome-blind 150 BigCodeBench tasks thuộc **train split**, đã có
+Level 1 hoàn chỉnh nhưng chưa có Level 2. Nó sinh đủ bốn nhánh multi-Verify còn thiếu,
+reuse bốn nhánh Level 1 tương thích và không thay đổi validation/test. Vì đây là nâng
+cấp các task cũ, tổng số unique task IDs vẫn là 1,434; không được cộng 150 lần nữa vào
+task count.
+
+![CBV-Bench inventory sau train Level-2 extension](../results/cbv_train_l2_extension_12112026/combined_summary/figures/cbv_data_inventory_after_extension.png)
+
+*Hình 27.7 — Inventory hiện hành. Panel (a) so sánh selected/L1/L2 theo dataset;
+panel (b) chỉ ra toàn bộ +150 nằm trong BigCodeBench train; panel (c) giữ nguyên
+validation và frozen test; panel (d) tóm tắt quy mô và incremental collection cost.*
+
+#### 27.9.1. Tổng hợp toàn bộ dữ liệu hiện có
+
+| Dataset | Unique tasks | L1 complete | L2 trước extension | L2 thêm mới | L2 hiện tại | Complete L2 trajectories |
+|---|---:|---:|---:|---:|---:|---:|
+| HumanEval | 163 | **163** | 163 | +0 | **163** | 1,304 |
+| LiveCodeBench | 175 | **174** | 171 | +0 | **171** | 1,368 |
+| BigCodeBench | 1,096 | **1,096** | 250 | **+150** | **400** | 3,200 |
+| **Tổng unique** | **1,434** | **1,433** | **584** | **+150** | **734** | **5,872** |
+
+Kết quả quan trọng nhất của extension:
+
+- Level-2 complete tăng từ **584 lên 734 task groups** (+25.7%).
+- Train Level-2 tăng từ **381 lên 531 tasks** (+39.4%), tương ứng **4,248 complete
+  trajectories** để học policy multi-history.
+- BigCodeBench Level-2 tăng từ **250 lên 400 tasks** (+60.0%); riêng train split tăng
+  từ 181 lên 331 tasks (+82.9%).
+- Level 1 gần như phủ toàn bộ benchmark: **1,433/1,434 tasks**. Level 2 là structured
+  subset có đủ tám trajectories, không phải một tập task độc lập.
+
+Phân bố theo frozen split:
+
+| Split | Unique tasks | L1 complete | L2 cũ | L2 thêm | L2 hiện tại | L2 coverage |
+|---|---:|---:|---:|---:|---:|---:|
+| Train | 1,000 | 1,000 | 381 | **+150** | **531** | 53.1% |
+| Validation | 217 | 217 | 98 | +0 | **98** | 45.2% |
+| Frozen test | 217 | 216 | 105 | +0 | **105** | 48.4% |
+| **Tổng** | **1,434** | **1,433** | **584** | **+150** | **734** | **51.2%** |
+
+Storage hiện chứa **10,268 raw trajectory rows** và **8,668 deduplicated
+`(dataset, task_id, sequence)` rows**. Chênh lệch xuất hiện vì một số BigCodeBench task
+có cả collection condition Level 1 và Level 2. Khi train hoặc thống kê cross-level phải
+deduplicate theo task-sequence, không được coi các bản sao storage là sample độc lập.
+
+#### 27.9.2. Extension accounting và integrity
+
+| Thành phần | Số lượng |
+|---|---:|
+| BigCodeBench train tasks được nâng lên L2 | **150** |
+| Complete extension records | **1,200 = 150 × 8** |
+| Level-1 records được reuse | **600 = 150 × 4** |
+| Net-new multi-Verify records | **600 = 150 × 4** |
+| Incremental Teacher usage | **600 calls / 1,118,929 tokens** |
+| Full-tree Teacher accounting, gồm imported L1 | **1,050 calls / 1,851,818 tokens** |
+
+Post-run integrity xác nhận **150/150 tasks** và **1,200/1,200 trajectories** hoàn
+chỉnh. Recovery chỉ hoàn tất evaluator records bị thiếu, không gọi lại Student/Teacher;
+các immutable cache entries và provenance được giữ nguyên.
+
+#### 27.9.3. Training signal sau khi gộp dữ liệu cũ và mới
+
+![CBV-Bench train supervision sau extension](../results/cbv_train_l2_extension_12112026/combined_summary/figures/cbv_train_signal_after_extension.png)
+
+*Hình 27.8 — Chỉ dùng 531 train tasks có đủ tám nhánh. Panel (a) là final accuracy
+của từng observed sequence; panel (b) cho thấy mất cân bằng Helpful/Harmful/No-change;
+panel (c) cho thấy net conditional effect phụ thuộc cả dataset lẫn checkpoint.*
+
+Accuracy trên **531 train Level-2 task groups**:
+
+| Sequence | SSS | VSS | SVS | SSV | VVS | VSV | SVV | VVV |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| Passed tasks | 205 | 210 | 227 | 226 | 230 | 229 | 240 | **242** |
+| Accuracy | 38.61% | 39.55% | 42.75% | 42.56% | 43.31% | 43.13% | 45.20% | **45.57%** |
+| Gain so với SSS | — | +0.94 pp | +4.14 pp | +3.95 pp | +4.71 pp | +4.52 pp | +6.59 pp | **+6.97 pp** |
+
+`VVV` tốt nhất khi aggregate train, nhưng **không phải fixed policy tốt nhất trên mọi
+dataset**: HumanEval có `SVV = VVV = 84.69%`, LiveCodeBench tốt nhất ở `SVV = 24.51%`
+trong khi `VVV = 22.55%`, còn BigCodeBench tốt nhất ở `VVV = 41.09%`. Đây là evidence
+trực tiếp rằng checkpoint/history value phụ thuộc distribution và không nên hard-code
+một sequence toàn cục.
+
+Single-Verify labels từ baseline `SSS`:
+
+| Checkpoint | Helpful | Harmful | No-change | Net gain | No-change rate |
+|---|---:|---:|---:|---:|---:|
+| CP1 Planner | 17 | 12 | 502 | +0.94 pp | 94.54% |
+| CP2 Coder | **29** | 7 | 495 | **+4.14 pp** | 93.22% |
+| CP3 Reviewer | 26 | **5** | 500 | +3.95 pp | 94.16% |
+| **Tổng checkpoint rows** | **72** | **24** | **1,497** | — | **93.97%** |
+
+Ba checkpoint của cùng task có tương quan và không được coi là 1,593 task độc lập.
+Bảng này mô tả supervision rows: Helpful chỉ chiếm 4.52%, Harmful 1.51%, còn No-change
+chiếm 93.97%. Dữ liệu đã sạch và paired-complete nhưng learning problem vẫn khó vì
+positive intervention value rất thưa.
+
+Khi tính marginal effect trên **mọi shared-prefix history**, checkpoint tốt nhất cũng
+đổi theo dataset:
+
+| Dataset | CP1 net | CP2 net | CP3 net | Insight |
+|---|---:|---:|---:|---|
+| HumanEval | +0.3 pp | +2.3 pp | **+4.8 pp** | CP3 có giá trị cao nhất |
+| LiveCodeBench | **−1.5 pp** | **+3.9 pp** | +1.5 pp | CP1 gây hại ròng; CP2 tốt nhất |
+| BigCodeBench | +1.4 pp | **+3.3 pp** | +3.0 pp | CP2/CP3 gần nhau |
+
+#### 27.9.4. Insight nghiên cứu và cách sử dụng đúng
+
+1. **Dataset đủ lớn hơn rõ rệt cho multi-history learning.** 531 train tasks và 4,248
+   complete trajectories cung cấp thêm 150 counterfactual trees mà không làm bẩn
+   validation/test boundary.
+2. **Bottleneck không còn đơn thuần là số row.** Tín hiệu Helpful/Harmful vẫn rất
+   thưa; controller cần class-aware learning, calibration và task-level evaluation,
+   không chỉ tăng model size.
+3. **CP2/CP3 là vùng giá trị chính nhưng không có checkpoint thắng tuyệt đối.** CP2
+   có aggregate single gain cao nhất; CP3 mạnh nhất trên HumanEval; CP1 âm trên
+   LiveCodeBench conditional histories. Điều này ủng hộ downstream-aware routing.
+4. **Multi-Verify có aggregate headroom nhưng không đồng nghĩa luôn verify.** `VVV`
+   tăng +6.97 pp trên train aggregate, song nhiều call là No-change và trên
+   LiveCodeBench nó kém `SVV`. Accuracy phải luôn báo cáo cùng actual Teacher tokens.
+5. **Không dùng các con số train làm confirmatory result.** Chúng phù hợp cho data
+   audit, training và hypothesis generation. Model selection chỉ dùng grouped train/CV
+   và validation; frozen test vẫn dành cho đánh giá khóa cuối cùng.
+
+Artifacts tái lập:
+
+- [Inventory Markdown](../results/cbv_train_l2_extension_12112026/combined_summary/CBV_data_inventory.md)
+- [Machine-readable combined summary](../results/cbv_train_l2_extension_12112026/combined_summary/combined_data_summary.json)
+- [Dataset/split inventory](../results/cbv_train_l2_extension_12112026/combined_summary/tasks_by_dataset_split.csv)
+- [Train sequence outcomes](../results/cbv_train_l2_extension_12112026/combined_summary/train_level2_sequence_outcomes.csv)
+- [Train single-Verify labels](../results/cbv_train_l2_extension_12112026/combined_summary/train_single_verify_labels.csv)
+- [Train conditional-effect labels](../results/cbv_train_l2_extension_12112026/combined_summary/train_conditional_effect_labels.csv)
+- [Figure generator](../scripts/plot_cbv_data_inventory_extension.py)
+
+### 27.10. Multi-Verification Synergy Audit trên 531 train tasks
+
+Audit mới phân tích **toàn bộ 531 train tasks × 8 trajectories = 4,248 trajectories**,
+gồm 381 task cũ và 150 BigCodeBench extension. Phân tích chỉ đọc train artifacts;
+không truy cập validation/frozen-test outcomes, không train model và không gọi lại
+Student/Teacher.
+
+![Expanded Multi-Verification Synergy Audit](../results/darc_v052_synergy_audit/figures/synergy_audit_summary.png)
+
+*Hình 27.9 — Panel (a) phân rã task theo mức verification thực sự cần; panel (b)
+cho thấy 94.77% marginal interventions không đổi final correctness; panel (c) đặt
+accuracy cạnh actual Teacher-token cost và làm nổi bật operating point `SVV`.*
+
+| Task-level outcome | Tasks | Tỷ lệ |
+|---|---:|---:|
+| Đã đúng bằng `SSS` | 205 | 38.61% |
+| Baseline sai nhưng một Single-Verify giải được | 50 | 9.42% |
+| **Thực sự cần Multi-Verify** | **10** | **1.88%** |
+| Không sequence quan sát nào giải được | 266 | 50.09% |
+
+Có **12 strict-synergy tasks**, nhưng chỉ 10 task thực sự bắt buộc Multi-Verify. Hai
+task còn lại có một multi sequence mang strict subset synergy nhưng vẫn có single
+sequence khác giải đúng. Vì vậy `strict synergy` là thuộc tính sequence-specific;
+`requires multiple verify` mới là kết luận task-level mạnh hơn.
+
+Trên 6,372 shared-prefix paired comparisons, Verify là **Helpful 240 lần (3.77%)**,
+**Harmful 93 lần (1.46%)** và **No-change 6,039 lần (94.77%)**. CP2 có aggregate net
+effect tốt nhất (+3.25 pp với khoảng 1,628 token/call), nhưng checkpoint tốt nhất vẫn
+thay đổi theo dataset: HumanEval thiên về CP3, LiveCodeBench thiên về CP2 và CP1 có
+net effect âm trên LiveCodeBench.
+
+| Fixed sequence | Accuracy | Mean Teacher tokens/task | Nhận xét |
+|---|---:|---:|---|
+| `SSS` | 38.61% | 0 | Không verification |
+| `SVS` | 42.75% | 1,672 | Single-Verify hiệu quả nhất |
+| `SVV` | **45.20%** | **3,675** | Điểm accuracy–cost mạnh |
+| `VVV` | **45.57%** | 5,141 | Accuracy cao nhất nhưng đắt nhất |
+
+`SVV` chỉ kém `VVV` **0.38 pp** nhưng tiết kiệm trung bình **1,466 tokens/task
+(28.5%)**. Extension 150 tasks bổ sung 2 task thực sự cần Multi-Verify và 3
+strict-synergy tasks, nâng tổng tương ứng từ 8 lên 10 và từ 9 lên 12. Extension không
+làm synergy rate cao hơn; đóng góp chính là tăng sample support và củng cố kết luận
+rằng Multi-Verify hữu ích nhưng hiếm.
+
+Kết luận cho controller design: mặc định nên ưu tiên **Skip hoặc chọn đúng một
+checkpoint**, chỉ mở Multi-Verify khi model có evidence mạnh về conditional gain.
+Continuation learning khó không phải vì thiếu branch, mà vì signal interaction rất
+thưa và No-change chiếm gần 95%.
+
+- [Synergy audit report đầy đủ](../results/darc_v052_synergy_audit/report/darc_v052_multi_verification_synergy_audit.md)
+- [Task-level outcome patterns](../results/darc_v052_synergy_audit/tables/task_outcome_patterns.csv)
+- [Strict synergy cases](../results/darc_v052_synergy_audit/tables/strict_synergy_cases.csv)
+- [Cohort comparison](../results/darc_v052_synergy_audit/tables/cohort_comparison.csv)
+- [Figure generator](../scripts/plot_darc_v052_synergy_summary.py)
 
 
 ## 28. DARC v0.2 — Risk/Cost-Aware Controller và frozen-test evaluation
@@ -2170,3 +2362,70 @@ Artifacts tái lập:
 - [Paired comparisons](../results/darc_v05_offline_rl_budgetfix_31102026/tables/paired_comparisons.csv)
 - [Selection manifest](../results/darc_v05_offline_rl_budgetfix_31102026/selection_manifest.json)
 - [Figure generator](../scripts/plot_darc_v05_budgetfix_report.py)
+
+### 30.8. Scaling Myopic iteration 0 từ 381 lên 531 Level-2 train tasks
+
+Thí nghiệm scaling giữ nguyên kiến trúc DARC v0.5, initialization từ v0.4,
+`myopic_targets@iteration_0`, optimizer, policy grid, ba seed và strict global-token
+replay. Thay đổi duy nhất là bổ sung 150 BigCodeBench Level-2 train tasks vào 381
+task ban đầu. Validation vẫn là đúng 98 task cũ; reference budget vẫn là 4,912
+tokens/task. Audit xác nhận train/validation overlap bằng 0, metadata model–prompt–workflow
+tương thích và frozen test không được load.
+
+![DARC v0.5 381-vs-531 matched-budget frontier](../results/darc_v05_531_scaling/figures/accuracy_cost_pareto.png)
+
+*Hình 30.3 — Accuracy–actual-token frontier trên cùng 98 validation tasks. DARC-531
+không tạo điểm Pareto mới; frontier tốt nhất vẫn thuộc DARC-381.*
+
+| Budget | DARC-381 Myopic i0 | DARC-531 Myopic i0 | C3 Myopic | Nhận xét về DARC-531 |
+|---:|---:|---:|---:|---|
+| 0% | 46.94% / 0 | 46.94% / 0 | 46.94% / 0 | Never-Verify baseline |
+| 25% | **51.36% / 107.7K** | 50.34% / 112.4K | 48.64% / 113.0K | Kém DARC-381 `-1.02 pp`; hơn C3 `+1.70 pp` |
+| 50% | **52.04% / 168.8K** | 51.36% / 202.6K | 50.68% / 234.1K | Kém DARC-381 `-0.68 pp`; vẫn tiết kiệm hơn C3 |
+| 75% | **52.04% / 180.9K** | 52.04% / 229.1K | 52.04% / 353.4K | Cùng accuracy, DARC-381 rẻ nhất |
+| 100% | **52.04% / 186.9K** | 52.04% / 239.8K | 52.04% / 357.3K | DARC-531 rẻ hơn C3 nhưng đắt hơn DARC-381 |
+
+Full-budget behavior trung bình trên ba seed:
+
+| Policy | Accuracy (95% task CI) | Tokens | Calls | Helpful / Harmful / No-change |
+|---|---:|---:|---:|---:|
+| **DARC-381 Myopic i0** | **52.04% [41.84, 62.24]** | **186,867** | **116.3** | 5.3 / 0.3 / 110.7 |
+| DARC-531 Myopic i0 | **52.04% [41.84, 62.24]** | 239,808 | 147.0 | 5.7 / 0.7 / 140.7 |
+| C3 MultiHistory Myopic | **52.04% [41.84, 62.24]** | 357,291 | 211.0 | 5.0 / 0.0 / 206.0 |
+
+#### Observed evidence
+
+1. **Không có accuracy gain từ 150 task mới.** Tại full budget, DARC-531 và
+   DARC-381 giải đúng cùng task-level outcomes: `0 win / 0 loss / 98 ties`, accuracy
+   delta `0.00 pp` và `p = 1.0`.
+2. **Hiệu quả token giảm so với DARC-381.** DARC-531 dùng thêm `52,941` tokens
+   (`+28.3%`) và `30.7` calls (`+26.4%`) để đạt cùng accuracy. Mọi positive-budget
+   point của DARC-531 đều bị DARC-381 Pareto-dominate.
+3. **DARC-531 vẫn hiệu quả hơn C3 tại high budget.** Tại 100%, nó tiết kiệm
+   `117,483` tokens (`32.9%`) và 64 calls (`30.3%`) so với C3, với cùng accuracy.
+4. **Verify tăng chủ yếu là No-change.** `140.7/147.0 = 95.7%` calls không đổi final
+   correctness; helpful precision chỉ khoảng `3.85%`. Đây là nguyên nhân trực tiếp
+   khiến token tăng nhưng accuracy không tăng.
+5. **Strict accounting hoạt động đúng.** Tất cả run có budget overshoot bằng 0;
+   positive-budget Verify-target coverage đạt 100% trên train và validation.
+
+#### Diễn giải và quyết định
+
+Kết quả **không ủng hộ giả thuyết rằng chỉ tăng số task train sẽ tự động cải thiện
+controller hiện tại**. Bằng chứng cho thấy DARC-531 trở nên permissive hơn trong việc
+gọi Teacher nhưng chưa ranking Helpful tốt hơn. Tuy nhiên chưa thể kết luận 150 task
+mới làm giảm chất lượng dữ liệu: extension chỉ thêm BigCodeBench trong khi validation
+là mixed-domain, và cùng 98 validation tasks cũng được dùng để chọn policy margin.
+
+Vì vậy candidate deployment/development hiện vẫn nên là **DARC-381 Myopic i0**.
+531-task checkpoint nên được giữ làm scaling ablation. Bước tiếp theo nên phân tích
+calibration/domain weighting và false-positive No-change trên 150 task mới, thay vì
+tiếp tục tăng data hoặc số policy iterations một cách cơ học.
+
+Artifacts:
+
+- [Scaling report](../results/darc_v05_531_scaling/report/darc_v05_531_scaling_report.md)
+- [Aggregate results](../results/darc_v05_531_scaling/tables/aggregate_results.csv)
+- [Paired comparisons](../results/darc_v05_531_scaling/tables/paired_comparisons.csv)
+- [Pareto table](../results/darc_v05_531_scaling/tables/pareto_points.csv)
+- [Run manifest](../results/darc_v05_531_scaling/run_manifest.json)
