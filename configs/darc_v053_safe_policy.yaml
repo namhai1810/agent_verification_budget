@@ -1,0 +1,77 @@
+schema_version: darc-v0.5.3-safe-policy-v1
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  split_train: train
+  split_validation: validation
+  frozen_test_access: forbidden
+
+baseline:
+  results_root: results/darc_v05_offline_rl_budgetfix_31102026
+  checkpoint_template: checkpoints/myopic_targets/seed_{seed}/iteration_0.pt
+  policy_table: tables/policy_grid.csv
+  result_table: tables/seed_results.csv
+  policy_label: "DARC v0.5 · myopic_targets · i0"
+  require_exact_reproduction: true
+
+output:
+  root: results/darc_v053_safe_policy
+
+reproducibility:
+  seeds: [20261031, 20261101, 20261117]
+  crossfit_seed: 20260501
+  crossfit_folds: 3
+  bootstrap_repetitions: 5000
+  permutation_repetitions: 10000
+
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  chunk_stride: 480
+  max_chunks_per_text: 5
+  batch_size: 32
+  device: auto
+  local_files_only: true
+  normalize: true
+  cache_dir: results/darc_v05_offline_rl/embedding_cache
+
+evaluation:
+  budget_fractions: [0.0, 0.25, 0.5, 0.75, 1.0]
+  reference_budget_per_task: 4912
+  hard_call_token_cap: 8192
+  recall_k: [10, 25, 50]
+  device: auto
+
+calibration:
+  # Natural-frequency multinomial Platt calibration. Class balancing is not
+  # used here because it would intentionally distort deployment probabilities.
+  regularization_c: 1.0
+  max_iter: 1000
+
+safe_policy_grid:
+  checkpoint_margin_sets:
+    - [0.0, 0.0, 0.0]
+    - [0.01, 0.0, 0.0]
+    - [0.02, 0.01, 0.0]
+  uncertainty_beta: [0.5, 1.0]
+  switch_margin: [0.0, 0.01]
+  harmful_weight: [0.5, 1.0]
+  shadow_price: [0.0, 0.01, 0.03]
+  dynamic_price_elasticity: [0.5, 1.0]
+
+selection:
+  # All policy selection is performed on cross-fitted training predictions.
+  token_utilization_penalty: 0.005
+  maximum_harmful_rate: 0.05
+  harmful_rate_tolerance_over_baseline: 0.01
+  maximum_accuracy_regression_pp: 0.0
+
+monitoring:
+  tqdm: true
+  mininterval_seconds: 1.0
+  save_incremental_per_seed: true
+
+smoke:
+  tasks: 6
+  budget_fractions: [0.0, 0.25]

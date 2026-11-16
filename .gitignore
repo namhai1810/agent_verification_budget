@@ -84,3 +84,4 @@ data/*
 
 plot_*
 test_*
+!tests/test_darc_v053_safe_policy.py
