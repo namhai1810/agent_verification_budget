@@ -6,7 +6,7 @@ import time
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -23,6 +23,25 @@ T = TypeVar("T", bound=BaseModel)
 class LLMResult:
     value: BaseModel
     record: InvocationRecord
+
+
+class APIResponseError(ValueError):
+    """Response failure that retains billable usage without exposing reasoning text."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        raw_output: str | None,
+        input_tokens: int,
+        output_tokens: int,
+        response_metadata: dict,
+    ) -> None:
+        super().__init__(message)
+        self.raw_output = raw_output
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
+        self.response_metadata = response_metadata
 
 
 class LLMClient:
@@ -44,6 +63,7 @@ class LLMClient:
         output_schema: type[T],
         context: InvocationContext,
         mock_factory: Callable[[], T],
+        request_overrides: dict[str, Any] | None = None,
     ) -> LLMResult:
         serialized = canonical_json([message.model_dump() for message in messages])
         prompt_hash = hashlib.sha256(serialized.encode()).hexdigest()
@@ -51,7 +71,7 @@ class LLMClient:
         started = time.perf_counter()
         raw_output: str | None = None
         attempt_count = 0
-        reservation = 0.0
+        reservation: float | None = None
         input_tokens = 0
         output_tokens = 0
         cost = 0.0
@@ -82,18 +102,33 @@ class LLMClient:
                     attempt_input_tokens = 0
                     attempt_output_tokens = 0
                     attempt_cost = 0.0
+                    attempt_response_metadata: dict = {}
                     reservation = self.budget.authorize(model, serialized)
                     try:
-                        attempt_raw, attempt_input_tokens, attempt_output_tokens = self._call_api(
-                            model, messages, output_schema, context.seed
+                        api_result = self._call_api(
+                            model,
+                            messages,
+                            output_schema,
+                            context.seed,
+                            request_overrides=request_overrides,
                         )
+                        if len(api_result) == 3:
+                            # Backward-compatible contract for existing test doubles.
+                            attempt_raw, attempt_input_tokens, attempt_output_tokens = api_result
+                        else:
+                            (
+                                attempt_raw,
+                                attempt_input_tokens,
+                                attempt_output_tokens,
+                                attempt_response_metadata,
+                            ) = api_result
                         raw_output = attempt_raw
                         attempt_cost = (
                             attempt_input_tokens * model.input_cost_per_million
                             + attempt_output_tokens * model.output_cost_per_million
                         ) / 1_000_000
                         self.budget.settle(reservation, attempt_cost)
-                        reservation = 0.0
+                        reservation = None
                         input_tokens += attempt_input_tokens
                         output_tokens += attempt_output_tokens
                         cost += attempt_cost
@@ -107,6 +142,7 @@ class LLMClient:
                                 "output_tokens": attempt_output_tokens,
                                 "cost_usd": attempt_cost,
                                 "latency_seconds": time.perf_counter() - attempt_started,
+                                "response_metadata": attempt_response_metadata,
                             }
                         )
                         break
@@ -117,9 +153,22 @@ class LLMClient:
                         ValueError,
                         ValidationError,
                     ) as exc:
-                        if reservation:
-                            self.budget.settle(reservation, 0.0)
-                            reservation = 0.0
+                        if isinstance(exc, APIResponseError):
+                            attempt_raw = exc.raw_output
+                            attempt_input_tokens = exc.input_tokens
+                            attempt_output_tokens = exc.output_tokens
+                            attempt_response_metadata = exc.response_metadata
+                            raw_output = attempt_raw
+                        if reservation is not None:
+                            attempt_cost = (
+                                attempt_input_tokens * model.input_cost_per_million
+                                + attempt_output_tokens * model.output_cost_per_million
+                            ) / 1_000_000
+                            self.budget.settle(reservation, attempt_cost)
+                            reservation = None
+                            input_tokens += attempt_input_tokens
+                            output_tokens += attempt_output_tokens
+                            cost += attempt_cost
                         attempts.append(
                             {
                                 "attempt": attempt_count,
@@ -129,6 +178,7 @@ class LLMClient:
                                 "output_tokens": attempt_output_tokens,
                                 "cost_usd": attempt_cost,
                                 "latency_seconds": time.perf_counter() - attempt_started,
+                                "response_metadata": attempt_response_metadata,
                                 "error": f"{type(exc).__name__}: {exc}",
                             }
                         )
@@ -159,7 +209,7 @@ class LLMClient:
             self.invocation_log.append(record)
             return LLMResult(parsed, record)
         except Exception as exc:
-            if reservation:
+            if reservation is not None:
                 self.budget.settle(reservation, 0.0)
             record = InvocationRecord(
                 invocation_id=invocation_id,
@@ -186,7 +236,8 @@ class LLMClient:
         messages: list[Message],
         output_schema: type[T],
         seed: int,
-    ) -> tuple[str, int, int]:
+        request_overrides: dict[str, Any] | None = None,
+    ) -> tuple[str, int, int, dict]:
         schema = output_schema.model_json_schema()
         if self.provider_config.response_format == "json_schema":
             response_format: dict = {
@@ -197,8 +248,10 @@ class LLMClient:
                     "schema": schema,
                 },
             }
-        else:
+        elif self.provider_config.response_format == "json_object":
             response_format = {"type": "json_object"}
+        else:
+            response_format = None
         payload = {
             "model": model.model_id,
             "messages": [message.model_dump() for message in messages],
@@ -206,8 +259,25 @@ class LLMClient:
             "top_p": model.top_p,
             "max_tokens": model.max_output_tokens,
             "seed": seed,
-            "response_format": response_format,
         }
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if model.top_k is not None:
+            payload["top_k"] = model.top_k
+        allowed_overrides = {
+            "thinking_token_budget",
+            "reasoning_effort",
+            "include_reasoning",
+            # vLLM/OpenAI-compatible sampling extension.  This is opt-in and is
+            # used only by explicitly logged recovery paths after a deterministic
+            # Student completion has already failed through repetition/truncation.
+            "repetition_penalty",
+        }
+        overrides = request_overrides or {}
+        unexpected = set(overrides).difference(allowed_overrides)
+        if unexpected:
+            raise ValueError(f"Unsupported LLM request overrides: {sorted(unexpected)}")
+        payload.update(overrides)
         import os
 
         api_key_env = model.api_key_env or self.provider_config.api_key_env
@@ -221,15 +291,61 @@ class LLMClient:
             response = client.post(url, headers=headers, json=payload)
             response.raise_for_status()
             body = response.json()
-        raw = body["choices"][0]["message"]["content"]
-        if not isinstance(raw, str):
-            raise ValueError("Expected string content from chat completion")
+        choice = body["choices"][0]
+        message = choice["message"]
+        raw = message.get("content")
         usage = body.get("usage") or {}
         input_tokens = int(
             usage.get("prompt_tokens") or BudgetManager.estimate_tokens(canonical_json(payload["messages"]))
         )
-        output_tokens = int(usage.get("completion_tokens") or BudgetManager.estimate_tokens(raw))
-        return raw, input_tokens, output_tokens
+        output_tokens = int(
+            usage.get("completion_tokens")
+            or (BudgetManager.estimate_tokens(raw) if isinstance(raw, str) else 0)
+        )
+        reasoning = message.get("reasoning_content")
+        reasoning_details = usage.get("completion_tokens_details") or {}
+        metadata = {
+            "finish_reason": choice.get("finish_reason"),
+            "reasoning_content_present": isinstance(reasoning, str) and bool(reasoning),
+            "reasoning_content_characters": len(reasoning) if isinstance(reasoning, str) else 0,
+            "reasoning_content_sha256": (
+                hashlib.sha256(reasoning.encode()).hexdigest()
+                if isinstance(reasoning, str) and reasoning
+                else None
+            ),
+            "reasoning_tokens": reasoning_details.get("reasoning_tokens"),
+            "final_content_characters": len(raw) if isinstance(raw, str) else 0,
+            "usage_prompt_tokens": usage.get("prompt_tokens"),
+            "usage_completion_tokens": usage.get("completion_tokens"),
+            "usage_total_tokens": usage.get("total_tokens"),
+            "thinking_token_budget_requested": overrides.get("thinking_token_budget"),
+            "reasoning_effort_requested": overrides.get("reasoning_effort"),
+        }
+        if choice.get("finish_reason") == "length":
+            raise APIResponseError(
+                "completion truncated: finish_reason=length",
+                raw_output=raw if isinstance(raw, str) else None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_metadata=metadata,
+            )
+        if not isinstance(raw, str) or not raw.strip():
+            raise APIResponseError(
+                "Expected non-empty final content after reasoning separation",
+                raw_output=raw if isinstance(raw, str) else None,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_metadata=metadata,
+            )
+        if raw.lstrip().startswith("<think>") or "</think>" in raw:
+            raise APIResponseError(
+                "Reasoning content leaked into final JSON content",
+                raw_output=raw,
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                response_metadata=metadata,
+            )
+        return raw, input_tokens, output_tokens, metadata
 
     @staticmethod
     def _parse_json(raw: str) -> dict:

@@ -305,6 +305,7 @@ def train_crossfit_iteration(
     writer: Any,
     variant: str,
     progress: dict[str, Any],
+    validation_task_folds: dict[str, int] | None = None,
 ) -> DARCv05Ensemble:
     torch = _torch()
     device = select_device(device_name)
@@ -468,6 +469,28 @@ def train_crossfit_iteration(
             val_cost_rows: list[float] = []
             with torch.inference_mode():
                 all_validation = np.arange(len(validation_targets.state_indices))
+                if validation_task_folds is not None:
+                    # Cross-fitting must choose epochs using only the held-out
+                    # development fold for this member.  The legacy callers
+                    # keep their separate validation partition by leaving this
+                    # mapping unset.
+                    all_validation = np.asarray(
+                        [
+                            row
+                            for row in all_validation
+                            if validation_task_folds[
+                                validation_states[
+                                    int(validation_targets.state_indices[row])
+                                ].task_key
+                            ]
+                            == fold
+                        ],
+                        dtype=np.int64,
+                    )
+                    if len(all_validation) == 0:
+                        raise ValueError(
+                            f"Fold {fold} has no held-out validation targets"
+                        )
                 for start in range(0, len(all_validation), batch_size):
                     rows = all_validation[start : start + batch_size]
                     batch = _batch(

@@ -10,8 +10,10 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 license = {text = "MIT"}
 dependencies = [
+  "cryptography==50.0.2",
   "datasets==4.2.0",
   "httpx==0.28.1",
+  "lightgbm==4.6.0",
   "matplotlib==3.10.7",
   "numpy==2.2.6",
   "pydantic==2.12.3",
@@ -33,6 +35,22 @@ darc = [
   "transformers>=4.45,<5",
   "safetensors>=0.4,<1",
   "tensorboard>=2.18,<3",
+]
+bigcodebench-pilot = [
+  "Django==5.2.8",
+  "Faker>=20.1.0",
+  "folium==0.20.0",
+  "holidays>=0.29",
+  "nltk==3.10.4",
+  "opencv-python-headless==4.12.0.88",
+  "python-http-client==3.3.7",
+  "seaborn==0.13.2",
+  "sendgrid==6.12.5",
+  "statsmodels==0.14.5",
+  "wikipedia==1.4.0",
+  "wordcloud==1.9.4",
+  "wordninja==2.0.0",
+  "xmltodict==1.0.4",
 ]
 
 [project.scripts]

@@ -157,12 +157,27 @@ class BigCodeBenchRunner:
             "PYTHONDONTWRITEBYTECODE": "1",
             "PYTHONHASHSEED": "0",
             "OMP_NUM_THREADS": "1",
+            "OPENBLAS_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
         }
+
+    @staticmethod
+    def _cpu_limit_seconds(wall_timeout_seconds: int) -> int:
+        """Keep RLIMIT_CPU behind the parent-enforced wall-clock timeout.
+
+        Scientific Python imports can accumulate CPU time in native helper threads.  If the
+        CPU hard limit equals the wall timeout, the kernel may SIGKILL the worker before the
+        trusted parent can classify the evaluation as ``TIMEOUT``.  The parent still enforces
+        the configured timeout; this larger CPU limit is only defense in depth.
+        """
+        return max(2, int(wall_timeout_seconds) * 2)
 
     def _set_limits(self) -> None:
         memory = self.config.memory_mb * 1024 * 1024
         resource.setrlimit(resource.RLIMIT_AS, (memory, memory))
-        cpu = max(1, self.config.timeout_seconds - 1)
+        cpu = self._cpu_limit_seconds(self.config.timeout_seconds)
         resource.setrlimit(resource.RLIMIT_CPU, (cpu, cpu))
         # RLIMIT_NPROC is user-wide and counts threads, so a fixed value such as 1 or 64 can be
         # exhausted already on a shared host. Preserve defense in depth while granting this worker
@@ -180,7 +195,11 @@ class BigCodeBenchRunner:
                 continue
             threads = next((line for line in fields if line.startswith("Threads:")), "Threads:\t1")
             current_tasks += int(threads.split()[1])
-        worker_task_limit = current_tasks + max(16, self.config.max_processes)
+        # Leave bounded headroom for legitimate CLONE_THREAD calls.  vLLM can
+        # add background threads just after readiness, so a 16-task allowance
+        # produced a transient false-negative in the isolation probe.  Seccomp
+        # separately and irreversibly denies process-form clone/fork/vfork.
+        worker_task_limit = current_tasks + max(64, self.config.max_processes)
         _, hard_limit = resource.getrlimit(resource.RLIMIT_NPROC)
         if hard_limit != resource.RLIM_INFINITY:
             worker_task_limit = min(worker_task_limit, hard_limit)

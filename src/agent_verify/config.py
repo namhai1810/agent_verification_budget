@@ -61,6 +61,9 @@ class ModelConfig(StrictModel):
     api_key_env: str | None = None
     temperature: float = Field(ge=0.0, le=2.0)
     top_p: float = Field(gt=0.0, le=1.0)
+    # vLLM accepts top_k as an OpenAI-compatible extension. None preserves
+    # historical request payloads and fingerprints.
+    top_k: int | None = Field(default=None, ge=1)
     max_output_tokens: int = Field(gt=0)
     seed: int
     prompt_version: str = Field(min_length=1)
@@ -81,7 +84,7 @@ class ProviderConfig(StrictModel):
     api_key_env: str = "OPENAI_API_KEY"
     timeout_seconds: float = Field(default=120.0, gt=0)
     max_retries: int = Field(default=2, ge=0)
-    response_format: Literal["json_schema", "json_object"] = "json_schema"
+    response_format: Literal["json_schema", "json_object", "none"] = "json_schema"
 
 
 class BudgetConfig(StrictModel):
@@ -113,6 +116,9 @@ class AppConfig(StrictModel):
     @property
     def fingerprint(self) -> str:
         payload_dict = self.model_dump(mode="json")
+        for model in payload_dict.get("models", {}).values():
+            if model.get("top_k") is None:
+                model.pop("top_k", None)
         dataset = self.experiment.dataset
         if dataset.name == "openai_humaneval":
             # Keep historical HumanEval run IDs stable after adding Phase-3-only fields.

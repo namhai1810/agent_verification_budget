@@ -314,6 +314,18 @@ def _bigcodebench_result(payload: dict) -> dict:
     }
 
 
+def _unhandled_exception_status(mode: str, exc: BaseException) -> str:
+    """Separate generated-code failures from evaluator infrastructure failures."""
+
+    if mode == "bigcodebench":
+        prefix = "RUNTIME_ERROR"
+    elif mode == "livecodebench":
+        prefix = "EVALUATOR_ERROR"
+    else:
+        prefix = "failed"
+    return f"{prefix}:{type(exc).__name__}"
+
+
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "--probe-isolation":
         return probe_isolation()
@@ -360,8 +372,12 @@ def main() -> int:
             exec(compile(source, "<isolated-humaneval>", "exec"), namespace, namespace)
             result = {"passed": True, "status": "passed"}
     except BaseException as exc:  # The sandbox must contain arbitrary generated code.
-        prefix = "EVALUATOR_ERROR" if mode in {"livecodebench", "bigcodebench"} else "failed"
-        result = {"passed": False, "status": f"{prefix}:{type(exc).__name__}"}
+        # BigCodeBench executes arbitrary generated source and its tests inside
+        # this block. A user-code RuntimeError is a normal failed evaluation,
+        # not an evaluator infrastructure failure. Sandbox setup failures were
+        # already caught and labelled above, while missing declared libraries
+        # are rejected by the parent preflight before any task is run.
+        result = {"passed": False, "status": _unhandled_exception_status(mode, exc)}
         if os.environ.get("AGENT_VERIFY_EVALUATOR_DEBUG") == "1":
             result["debug_error"] = repr(exc)[-1000:]
     result["worker_seconds"] = time.perf_counter() - started

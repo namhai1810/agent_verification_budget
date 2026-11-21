@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -116,10 +116,14 @@ class TeacherVerifier:
         client: LLMClient,
         model: ModelConfig,
         event_log: JsonlStore,
+        request_overrides: dict[str, Any] | None = None,
     ) -> None:
         self.client = client
         self.model = model
         self.event_log = event_log
+        # Kept outside ModelConfig so historical model/config fingerprints do not
+        # change.  This is used by explicit reasoning-enabled pilots only.
+        self.request_overrides = dict(request_overrides or {})
 
     def verify(
         self,
@@ -178,6 +182,7 @@ class TeacherVerifier:
                 messages=messages,
                 output_schema=response_model,
                 context=context,
+                request_overrides=self.request_overrides,
                 mock_factory=lambda: response_model(
                     verdict="uncertain",
                     corrected_artifact=original_artifact,

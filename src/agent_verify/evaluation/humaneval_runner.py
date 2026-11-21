@@ -18,6 +18,44 @@ class SandboxUnavailable(RuntimeError):
     pass
 
 
+def thread_compatible_nproc_limit(
+    requested_processes: int,
+    *,
+    current_tasks: int | None = None,
+    hard_limit: int | None = None,
+) -> int:
+    """Keep a small thread allowance without permitting process escape.
+
+    RLIMIT_NPROC is user-wide and counts threads. Setting it to ``1`` on a shared
+    host can therefore block a new thread in the already-running sandbox worker.
+    Seccomp remains the mechanism that denies fork/vfork/process-form clone.
+    """
+    if current_tasks is None:
+        current_tasks = 0
+        uid = os.getuid()
+        for status_path in Path("/proc").glob("[0-9]*/status"):
+            try:
+                fields = status_path.read_text(encoding="utf-8").splitlines()
+            except (FileNotFoundError, PermissionError, ProcessLookupError):
+                continue
+            owner = next((line for line in fields if line.startswith("Uid:")), "")
+            if not owner or int(owner.split()[1]) != uid:
+                continue
+            threads = next((line for line in fields if line.startswith("Threads:")), "Threads:\t1")
+            current_tasks += int(threads.split()[1])
+    if hard_limit is None:
+        _, hard_limit = resource.getrlimit(resource.RLIMIT_NPROC)
+    # vLLM may still create a few background threads immediately after its API
+    # becomes ready.  A 16-task margin was too small under that startup race and
+    # could make the sandbox reject even one legitimate Python thread.  Process
+    # escape remains denied independently by seccomp; this allowance is only for
+    # CLONE_THREAD and is still bounded by the inherited hard limit.
+    limit = current_tasks + max(64, requested_processes)
+    if hard_limit != resource.RLIM_INFINITY:
+        limit = min(limit, hard_limit)
+    return max(1, int(limit))
+
+
 class HumanEvalRunner:
     def __init__(
         self,
@@ -154,9 +192,7 @@ class HumanEvalRunner:
         resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
         cpu_seconds = max(1, self.config.timeout_seconds - 1)
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))
-        resource.setrlimit(
-            resource.RLIMIT_NPROC,
-            (self.config.max_processes, self.config.max_processes),
-        )
+        process_limit = thread_compatible_nproc_limit(self.config.max_processes)
+        resource.setrlimit(resource.RLIMIT_NPROC, (process_limit, process_limit))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))

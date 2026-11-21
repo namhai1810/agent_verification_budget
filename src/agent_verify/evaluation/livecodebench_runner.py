@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ast
-from functools import partial
 import json
 import os
 import resource
@@ -12,10 +11,14 @@ import subprocess
 import sys
 import tempfile
 import time
+from functools import partial
 from pathlib import Path
 
 from agent_verify.config import EvaluationConfig
-from agent_verify.evaluation.humaneval_runner import SandboxUnavailable
+from agent_verify.evaluation.humaneval_runner import (
+    SandboxUnavailable,
+    thread_compatible_nproc_limit,
+)
 from agent_verify.livecodebench_dataset import OFFICIAL_EVALUATOR_COMMIT
 from agent_verify.logging import JsonlStore, content_id
 from agent_verify.schemas import EvaluationResult, LiveCodeBenchPrivateCase
@@ -239,6 +242,7 @@ class LiveCodeBenchRunner:
         # A distinct hard limit lets SIGXCPU surface before SIGKILL. The
         # parent maps either resource-limit signal to a model TIMEOUT.
         resource.setrlimit(resource.RLIMIT_CPU, (cpu_limit, cpu_limit + 1))
-        resource.setrlimit(resource.RLIMIT_NPROC, (self.config.max_processes, self.config.max_processes))
+        process_limit = thread_compatible_nproc_limit(self.config.max_processes)
+        resource.setrlimit(resource.RLIMIT_NPROC, (process_limit, process_limit))
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         resource.setrlimit(resource.RLIMIT_FSIZE, (1024 * 1024, 1024 * 1024))

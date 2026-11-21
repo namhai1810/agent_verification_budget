@@ -2429,3 +2429,596 @@ Artifacts:
 - [Paired comparisons](../results/darc_v05_531_scaling/tables/paired_comparisons.csv)
 - [Pareto table](../results/darc_v05_531_scaling/tables/pareto_points.csv)
 - [Run manifest](../results/darc_v05_531_scaling/run_manifest.json)
+
+### 30.9. DARC v0.5 Bottleneck Diagnostic — accuracy ceiling và token waste
+
+Diagnostic này được thực hiện trên **381 Level-2 train tasks** và **98 validation
+tasks** của DARC v0.5 Myopic iteration 0. Phần learnability chỉ dùng training và
+task-grouped train-OOF; validation chỉ dùng để chẩn đoán sau khi model/policy đã cố
+định. Frozen test không được load, Student/Teacher không được gọi lại và checkpoint
+DARC không bị sửa đổi.
+
+`OOF` (*Out-of-Fold*) nghĩa là mỗi training task được dự đoán bởi fold-model chưa
+từng train trên task đó. Fold được chia theo task, do đó các state/checkpoint của
+cùng một task không thể đồng thời xuất hiện ở train và OOF evaluation. `AUPRC`
+(*Area Under the Precision–Recall Curve*) đo khả năng xếp hạng lớp Helpful hiếm;
+random baseline xấp xỉ Helpful prevalence, không phải 0.5 như AUROC.
+
+#### 30.9.1. Oracle minimum cost tại cùng final accuracy
+
+Trên 98 validation tasks, `SSS` giải đúng `46/98 = 46.94%`. Trong tám observed
+Level-2 trajectories, chỉ có thêm năm task có thể được cứu; do đó observed-branch
+accuracy ceiling là `51/98 = 52.04%`. Cả ba seed DARC đều đạt ceiling này, nhưng
+chi phí khác nhau rất lớn.
+
+![Oracle minimum cost at matched accuracy](../results/darc_bottleneck_diagnostic/figures/01_oracle_minimum_cost.png)
+
+*Hình 30.4 — Chi phí DARC và diagnostic oracle tại cùng 51/98 task đúng. Oracle
+được phép nhìn outcome đã quan sát nên chỉ là lower bound phân tích, không phải
+policy có thể triển khai.*
+
+| Seed | Final accuracy | DARC tokens | Oracle minimum | Avoidable tokens | DARC/oracle |
+|---:|---:|---:|---:|---:|---:|
+| 20261031 | 52.04% | 209,452 | 8,068 | 201,384 | 26.0x |
+| 20261101 | 52.04% | **108,532** | 8,068 | 100,464 | **13.5x** |
+| 20261117 | 52.04% | 242,617 | 8,068 | 234,549 | 30.1x |
+
+Kết quả này tách hai vấn đề: DARC đã tìm đủ năm rescue để đạt observed ceiling,
+nhưng chưa biết **không gọi Teacher** trên phần lớn state vô ích. Khoảng cách chính
+hiện tại là token allocation/selection precision, không phải raw validation
+accuracy.
+
+#### 30.9.2. Helpful learnability và seed instability
+
+Train có `117/2,667 = 4.39%` Helpful states; validation chỉ có
+`15/686 = 2.19%`. Vì vậy accuracy phân loại thông thường dễ gây hiểu nhầm: model
+đoán toàn bộ No-change vẫn đạt hơn 95%. AUPRC được dùng làm metric chính cho lớp
+Helpful.
+
+![Helpful learnability](../results/darc_bottleneck_diagnostic/figures/02_helpful_learnability.png)
+
+*Hình 30.5 — Helpful AUPRC của Logistic Regression, LightGBM và DARC. Đường/giá
+trị prevalence là mức random-ranking tham chiếu; validation không được dùng để
+chọn seed hoặc threshold.*
+
+| Predictor | Train-OOF AUPRC | Train-OOF AUROC | Validation AUPRC | Validation AUROC |
+|---|---:|---:|---:|---:|
+| Logistic Regression | 0.075 | 0.626 | 0.056 | 0.613 |
+| LightGBM | 0.065 | 0.585 | 0.041 | 0.624 |
+| DARC seed 20261031 | 0.052 | 0.591 | 0.084 | 0.651 |
+| **DARC seed 20261101** | **0.330** | **0.898** | **0.192** | **0.690** |
+| DARC seed 20261117 | 0.122 | 0.750 | 0.044 | 0.476 |
+
+Seed `20261101` cho thấy feature hiện tại có Helpful signal rõ ràng: train-OOF
+AUPRC `0.330` so với prevalence `0.044`, và validation AUPRC `0.192` so với
+prevalence `0.022`. Tuy nhiên chênh lệch rất lớn giữa ba seed chứng minh training và
+calibration chưa ổn định. Không được chọn seed `20261101` bằng validation; kết quả
+này chỉ định hướng nghiên cứu về seed-stable ensemble/calibration.
+
+#### 30.9.3. Local effect, Q-ranking và policy waste
+
+| Checkpoint | Helpful | Harmful | No-change | Mean Teacher tokens |
+|---:|---:|---:|---:|---:|
+| CP1 | 3.15% | 2.36% | 94.49% | 1,572 |
+| **CP2** | **5.38%** | 1.18% | 93.44% | 1,674 |
+| CP3 | 4.20% | **1.12%** | 94.69% | **2,041** |
+
+CP2 có aggregate trade-off tốt nhất: Helpful rate cao nhất, Harmful thấp và rẻ hơn
+CP3. Tuy nhiên hiệu quả checkpoint phụ thuộc dataset: BigCodeBench mạnh nhất ở CP2,
+HumanEval ở CP3, còn LiveCodeBench nghiêng về CP2. Điều này ủng hộ checkpoint- và
+dataset-aware calibration thay vì một global threshold duy nhất.
+
+![DARC policy waste](../results/darc_bottleneck_diagnostic/figures/04_policy_waste.png)
+
+*Hình 30.6 — Thành phần Helpful/Harmful/No-change của các Verify calls và actual
+tokens lãng phí bởi No-change tại full budget.*
+
+| Seed | Verify calls | Helpful | Harmful | No-change | Wasted tokens |
+|---:|---:|---:|---:|---:|---:|
+| 20261031 | 135 | 5 | 0 | 130 | 201,189 |
+| 20261101 | 66 | 5 | 0 | 61 | 100,841 |
+| 20261117 | 148 | 6 | 1 | 141 | 230,875 |
+
+Từ `92.4%` đến `96.3%` Verify calls là No-change. Q-advantage ranking cũng phụ
+thuộc seed: train-OOF AUPRC lần lượt là `0.088`, `0.377`, `0.098`; gain Spearman
+chỉ `0.125`, `0.291`, `0.170`. AUROC tương đối tốt không tự động chuyển thành
+token efficiency vì policy cần precision rất cao ở phần top-ranked nhỏ.
+
+Lưu ý rằng Helpful/Harmful ở đây là **local branch-consistent counterfactual
+effect** tại một state. Final policy win/loss là outcome sau toàn bộ trajectory;
+một local Harmful có thể được downstream agent sửa lại, và một local Helpful không
+nhất thiết tạo thêm final task correctness. Hai khái niệm được export thành bảng
+riêng để tránh suy diễn sai.
+
+#### 30.9.4. Single-Verify, Multi-Verify và giới hạn myopic target
+
+![Single versus multi Verify necessity](../results/darc_bottleneck_diagnostic/figures/06_single_multi_necessity.png)
+
+*Hình 30.7 — Số task đã đúng bằng SSS, giải được bằng một Verify, thực sự cần nhiều
+Verify, hoặc chưa được giải bởi bất kỳ observed trajectory nào.*
+
+| Split | SSS solved | Additional single-Verify | Requires multi-Verify | Unresolved |
+|---|---:|---:|---:|---:|
+| Train, 381 tasks | 153 | 37 | 8 | 183 |
+| Validation, 98 tasks | 46 | 5 | **0** | 47 |
+
+Train có chín strict-synergy patterns và tám task thực sự cần nhiều Verify.
+Validation có một strict-synergy pattern nhưng không có task nào bắt buộc phải dùng
+multi-Verify để đạt observed maximum, vì task đó vẫn có một successful
+single-Verify trajectory khác. Ngoài ra, không có multi-required train task nào mà
+mọi Verify step trên cheapest successful path đều mang myopic target không dương.
+Vì vậy dữ liệu này chưa ủng hộ kết luận rằng myopic supervision hoàn toàn không thể
+nhìn thấy các multi-Verify opportunities.
+
+#### 30.9.5. Kết luận bottleneck và quyết định tiếp theo
+
+1. **Accuracy ceiling:** DARC đã đạt observed validation ceiling `52.04%`; tối ưu
+   policy trên cùng trajectories không thể tạo thêm task đúng vượt ceiling này.
+2. **Primary bottleneck:** Helpful ranking/calibration và token allocation. DARC
+   dùng `13.5x–30.1x` oracle minimum cost để đạt cùng outcome.
+3. **Seed instability:** ba seed giải cùng số task nhưng dùng `108K–243K` tokens.
+4. **Multi-Verify chưa phải ưu tiên:** validation gain hiện có đều đạt được bằng
+   single Verify; vấn đề quan trọng hơn là chọn đúng checkpoint và biết khi nào
+   nên Wait.
+5. **Mục tiêu development tiếp theo:** giữ accuracy `52.04%` nhưng giảm token về
+   vùng `8K–20K`, dùng train-OOF Precision@K/Recall@K, conservative top-K allocation,
+   checkpoint/dataset calibration và seed-stable ensemble. Chỉ sau đó mới tăng
+   accuracy ceiling bằng dữ liệu hoặc Student/Teacher mạnh hơn.
+
+Artifacts:
+
+- [Bottleneck diagnostic report](../results/darc_bottleneck_diagnostic/report/darc_bottleneck_diagnostic.md)
+- [Oracle matched-accuracy table](../results/darc_bottleneck_diagnostic/tables/oracle_matched_accuracy.csv)
+- [Helpful learnability table](../results/darc_bottleneck_diagnostic/tables/helpful_learnability.csv)
+- [Policy failure summary](../results/darc_bottleneck_diagnostic/tables/policy_failure_summary.csv)
+- [Q-advantage quality](../results/darc_bottleneck_diagnostic/tables/q_advantage_quality.csv)
+- [Single/Multi task analysis](../results/darc_bottleneck_diagnostic/tables/single_multi_task_analysis.csv)
+- [Diagnostic manifest](../results/darc_bottleneck_diagnostic/diagnostic_manifest.json)
+
+## 31. Qwen3.8 Teacher-only và Artifact-Free Thinking Pilot
+
+Các pilot này dùng cùng **30 Level-2 training tasks khó** mà cả tám trajectory CBV
+đều thất bại. Mỗi task chỉ có một Teacher call; hidden evaluator không được đưa vào
+prompt. Hai input protocol được so sánh:
+
+- **Problem-Only:** chỉ public problem; Teacher tự giải từ đầu.
+- **Variant B / Artifact-Free Repair:** public problem + cached VVV final code +
+  public execution feedback; không có Planner/Coder/Reviewer artifacts.
+
+| Protocol | Không thinking | Thinking | Valid thinking responses | Truncated | Ghi chú |
+|---|---:|---:|---:|---:|---|
+| Problem-Only | 7/30 (23.33%) | **10/30 (33.33%)** | 11/30 | 19/30 | `+3` task; paired `p=0.4531` |
+| Variant B | 5/30 (16.67%) | **7/30 (23.33%)** sau salvage | 10/30 | 20/30 | `+2` task; paired `p=0.625` |
+
+### 31.1. Kết quả và diễn giải
+
+1. **Problem-Only thinking** cứu 10 task: HumanEval `7/10`, LiveCodeBench `1/10`,
+   BigCodeBench `2/10`. Trong 11 response hoàn chỉnh, 10 response pass evaluator,
+   nhưng 19 response còn lại hết token trước final JSON. Tổng latency khoảng 122
+   phút và log ghi nhận 157,686 reasoning tokens.
+2. **Variant B thinking ban đầu được report 0/30**, nhưng đây là lỗi protocol:
+   20 response bị truncate và 10 response có code hoàn chỉnh nhưng thiếu metadata
+   `strategy`/`explanation`, nên không response nào đến được evaluator.
+3. **Offline schema salvage** không gọi lại Teacher: giữ nguyên `code_lines`, chạy
+   `ast.parse()` rồi chấm 10 response hoàn chỉnh. Cả 10 qua syntax gate và 7 pass
+   hidden evaluator: HumanEval `5/5`, LiveCodeBench `2/2`, BigCodeBench `0/3`.
+   Vì vậy kết quả ITT đúng của diagnostic salvage là `7/30`, không phải `0/30`.
+4. Thinking cho tín hiệu semantic tích cực trên response hoàn chỉnh, nhưng chưa thể
+   khẳng định superiority: mẫu nhỏ, paired tests chưa significant, response validity
+   thấp và latency/token cost rất lớn. Bottleneck hiện tại là **reasoning không được
+   giới hạn và không dành chắc chắn token cho final JSON**, không chỉ là model quality.
+5. Headline token trong report thinking chưa cộng đầy đủ chi phí của các response bị
+   truncate; phải báo riêng reasoning tokens và latency, không diễn giải mức tăng token
+   headline như total serving cost thực tế.
+
+Artifacts:
+
+- [Problem-Only thinking report](../results/darc_qwen38_problem_only_thinking_30/report/darc_execution_repair_pilot.md)
+- [Variant B thinking raw report](../results/darc_qwen38_variant_b_thinking_30/report/darc_execution_repair_pilot.md)
+- [Variant B offline-salvage report](../results/darc_qwen38_variant_b_thinking_30_salvage/report/variant_b_thinking_salvage.md)
+- [Variant B salvaged task results](../results/darc_qwen38_variant_b_thinking_30_salvage/tables/task_results.csv)
+
+### 31.2. Thinking-token cap 3,500
+
+Hai protocol được chạy lại với native vLLM `thinking_token_budget=3500`, giữ
+`max_output_tokens=7000`, sampling settings, model, 30 task và evaluator không đổi.
+Metadata `strategy`/`explanation` được coi là optional; `code_lines` vẫn bắt buộc,
+phải parse được bằng `ast.parse()` trước evaluator. Cap được enforce thực tế: cả
+hai run có reasoning tối đa `3,499` tokens và không call nào vượt `3,500`.
+
+Các con số token dưới đây được tính lại từ **attempt ledger**, bao gồm failed và
+truncated calls; do đó thay thế headline token thiếu của các report cũ.
+
+| Protocol | Accuracy | Valid | Truncated | Actual tokens | Reasoning tokens | Latency |
+|---|---:|---:|---:|---:|---:|---:|
+| Problem-Only, non-thinking | 7/30 (23.33%) | 29/30 | 1 | 31,817 | 0 | 11.3 min |
+| Problem-Only, thinking không cap | 10/30 (33.33%) | 11/30 | 19 | 178,471 | 157,686 | 122.0 min |
+| **Problem-Only, cap 3,500** | **17/30 (56.67%)** | **26/30** | **4** | **133,630** | **90,321** | **91.4 min** |
+| Variant B, non-thinking | 5/30 (16.67%) | 27/30 | 3 | 49,807 | 0 | 19.5 min |
+| Variant B, thinking không cap, sau salvage | 7/30 (23.33%) | 10/30 | 20 | 199,599 | 172,591 | 127.8 min |
+| **Variant B, cap 3,500** | **14/30 (46.67%)** | **26/30** | **4** | **143,918** | **93,864** | **91.7 min** |
+
+Kết quả capped theo dataset:
+
+| Dataset | Problem-Only cap | Variant B cap |
+|---|---:|---:|
+| HumanEval | **8/10** | 7/10 |
+| LiveCodeBench | 6/10 | **7/10** |
+| BigCodeBench | **3/10** | 0/10 |
+| **Combined** | **17/30** | 14/30 |
+
+#### Evidence chính
+
+1. **Cap giải quyết đúng failure mode.** Problem-Only giảm truncation `19 → 4`,
+   giảm actual tokens `25.1%`, reasoning tokens `42.7%` và tăng accuracy
+   `10/30 → 17/30`. Paired outcome là `7 wins / 0 losses`, McNemar `p=0.0156`.
+2. **Variant B cũng cải thiện mạnh.** So với non-thinking, capped thinking tăng
+   `5/30 → 14/30` (`9 wins / 0 losses`, `p=0.0039`). So với uncapped thinking sau
+   salvage, nó tăng `7/30 → 14/30`, giảm actual tokens khoảng `27.9%` và reasoning
+   tokens khoảng `45.6%` (`7 wins / 0 losses`, `p=0.0156`).
+3. **Problem-Only hiện là cấu hình tốt nhất:** `17/30` với 133,630 tokens, so với
+   Variant B `14/30` với 143,918 tokens. Paired difference giữa hai capped protocol
+   chưa significant (`6` Problem-Only-only wins, `3` Variant-B-only wins,
+   `p=0.5078`).
+4. **Artifact anchoring phụ thuộc dataset.** VVV code + public feedback giúp Variant
+   B nhỉnh hơn một task trên LiveCodeBench, nhưng Variant B không cứu được task
+   BigCodeBench nào trong khi Problem-Only cứu ba. Đây là evidence gợi ý anchoring,
+   chưa phải causal proof.
+5. **Bốn truncation vẫn còn ở mỗi capped run.** Reasoning đã bị giới hạn, nhưng
+   khoảng 3,500 token còn lại đôi khi vẫn không đủ cho code/JSON dài. Vì vậy bước
+   tiếp theo nên phân tích final-code length hoặc thử cap thấp hơn trên train-only,
+   không đơn thuần tăng tổng output budget.
+6. Đây vẫn là **exploratory result trên 30 hard training tasks**. Không được diễn
+   giải các p-value hoặc accuracy này thành external/frozen-test generalization.
+
+Artifacts:
+
+- [Problem-Only capped report](../results/darc_qwen38_problem_only_thinking_budget_30/report/darc_execution_repair_pilot.md)
+- [Problem-Only capped task results](../results/darc_qwen38_problem_only_thinking_budget_30/tables/task_results.csv)
+- [Variant B capped report](../results/darc_qwen38_variant_b_thinking_budget_30/report/darc_execution_repair_pilot.md)
+- [Variant B capped task results](../results/darc_qwen38_variant_b_thinking_budget_30/tables/task_results.csv)
+
+## 32. Qwen3.8 Checkpoint Verification — VVV40 và Full 8-Trajectory Pilot
+
+Hai pilot này quay lại đúng workflow Planner–Coder–Reviewer của CBV-Bench, thay vì
+Problem-Only hoặc final-code repair. Student vẫn là
+`Qwen2.5-Coder-7B-Instruct-AWQ`; Teacher mới là `Qwen3.8-27B` với native thinking
+cap `3,500` và tối đa `7,000` output tokens. Teacher chỉ nhận public task và
+checkpoint artifact quan sát được tại thời điểm quyết định; hidden evaluator
+feedback không được đưa vào prompt.
+
+- **VVV40:** 40 task train, seed `42`, chỉ chạy trajectory `VVV`; gồm 20 old-oracle
+  unsolvable, 10 verification-rescued và 10 SSS-correct tasks.
+- **Full20:** 20 task train disjoint, seed `43`, chạy đủ tám trajectory
+  `SSS, VSS, SVS, SSV, VVS, VSV, SVV, VVV` bằng shared-prefix tree.
+
+### 32.1. VVV40 — Qwen3.8 so với cached Qwen2.5
+
+| Policy/Teacher | Correct | Accuracy | Teacher tokens |
+|---|---:|---:|---:|
+| Cached SSS, không Teacher | 10/40 | 25.0% | 0 |
+| Qwen2.5 Teacher, VVV | 16/40 | 40.0% | 208,360 |
+| **Qwen3.8 Teacher, VVV** | **22/40** | **55.0%** | **607,919** |
+
+Paired comparison giữa hai VVV Teacher cho `8` Qwen3.8 wins, `2` losses, `14`
+tie-correct và `16` tie-wrong: cải thiện ròng `+6/40 = +15` điểm phần trăm.
+Qwen3.8 còn giải được `4/20` task mà cả tám trajectory Qwen2.5 cũ đều thất bại.
+
+| Dataset | Tasks | Qwen3.8 VVV correct | Rescued vs SSS |
+|---|---:|---:|---:|
+| BigCodeBench | 27 | 13 | 6 |
+| HumanEval | 6 | 5 | 3 |
+| LiveCodeBench | 7 | 4 | 3 |
+
+Chi phí của Qwen3.8 VVV là `120` Teacher calls, `607,919` actual Teacher tokens,
+trong đó `374,279` reasoning tokens, và `18,545` giây cumulative Teacher latency.
+Accuracy tăng rõ, nhưng token cost bằng khoảng `2.92x` Qwen2.5 VVV. Đây chưa phải
+một Pareto improvement nếu không định giá thêm lợi ích accuracy.
+
+### 32.2. Full20 — oracle ceiling và fixed trajectory
+
+| Oracle trên 8 observed trajectories | Correct | Accuracy |
+|---|---:|---:|
+| Qwen2.5 Teacher | 12/20 | 60% |
+| **Qwen3.8 Teacher** | **17/20** | **85%** |
+
+Qwen3.8 mở thêm năm task chưa trajectory Qwen2.5 nào giải được:
+`BigCodeBench/844`, `BigCodeBench/302`, `LiveCodeBench/abc395_c`,
+`LiveCodeBench/abc396_f` và `LiveCodeBench/abc396_g`. Theo dataset, oracle tăng
+từ `7/10 → 9/10` trên BigCodeBench, giữ `2/2` trên HumanEval, và tăng
+`3/8 → 6/8` trên LiveCodeBench.
+
+| Trajectory | Qwen2.5 correct | Qwen3.8 correct | Qwen3.8 tokens | Paired wins/losses |
+|---|---:|---:|---:|---:|
+| SSS | 4/20 | 4/20 | 0 | 0 / 0 |
+| VSS | 8/20 | 9/20 | 102,238 | 3 / 2 |
+| SVS | 7/20 | 10/20 | **96,302** | 4 / 1 |
+| **SSV** | 7/20 | **15/20** | 111,223 | **8 / 0** |
+| VVS | 12/20 | 12/20 | 205,143 | 3 / 3 |
+| VSV | 8/20 | 11/20 | 217,496 | 6 / 3 |
+| SVV | 10/20 | 13/20 | 203,216 | 4 / 1 |
+| VVV | 12/20 | 12/20 | 323,298 | 4 / 4 |
+
+`SSV` — chỉ Verify CP3 — là fixed trajectory mạnh nhất: `75%` accuracy, cao hơn
+VVV `15` điểm phần trăm và chỉ dùng khoảng `34%` token của VVV. Vì vậy Teacher
+mạnh hơn không làm `Always VVV` trở thành policy tối ưu; CP1/CP2 vẫn có thể thêm
+chi phí hoặc gây hại trước khi workflow đến checkpoint có giá trị nhất.
+
+Full20 được thu bằng shared-prefix tree với `140` unique Teacher calls và
+`752,995` unique Teacher tokens. Token trong từng trajectory ở bảng trên là chi
+phí replay policy tương ứng; không được cộng các dòng đó để suy ra collection cost.
+
+### 32.3. Local checkpoint utility
+
+Mỗi checkpoint có `80` paired branch-consistent comparisons trên 20 task. Các
+comparison trong cùng task không độc lập và chỉ dùng để mô tả local effect.
+
+| Checkpoint | Helpful | Harmful | No-change | Net Helpful−Harmful |
+|---|---:|---:|---:|---:|
+| CP1 Planner | 13 (16.2%) | 11 (13.8%) | 56 (70.0%) | +2 |
+| CP2 Coder | 10 (12.5%) | 2 (2.5%) | 68 (85.0%) | +8 |
+| **CP3 Reviewer** | **20 (25.0%)** | **4 (5.0%)** | 56 (70.0%) | **+16** |
+
+CP3 có Helpful rate và net gain cao nhất. CP1 gần cân bằng giữa Helpful và Harmful,
+còn CP2 ít gây hại nhưng phần lớn là No-change. Evidence này phù hợp với kết quả
+`SSV` và tiếp tục ủng hộ checkpoint-selective, risk/cost-aware controller thay vì
+verify đồng loạt.
+
+### 32.4. Recovery caveat và kết luận
+
+Ba task gặp deterministic Student repetition sau Teacher correction và được resume
+bằng anti-repetition recovery có log đầy đủ; Teacher protocol không đổi:
+
+- VVV40 `BigCodeBench/1093`: recovery ở Coder, final vẫn sai.
+- VVV40 `BigCodeBench/1119`: recovery ở Reviewer, final đúng; Qwen2.5 VVV cũ cũng
+  đã đúng nên không tạo Qwen3.8-only win.
+- Full20 `BigCodeBench/533`: recovery ở Reviewer; task có successful `SSV` và
+  `SVV`, nhưng được giữ như sensitivity case khi báo cáo.
+
+Kết luận hiện tại:
+
+1. Qwen3.8 mở rộng observed oracle ceiling và tăng VVV accuracy so với Qwen2.5.
+2. Lợi ích đi kèm chi phí reasoning lớn; Qwen3.8 VVV chưa phải Pareto improvement.
+3. `SSV` là fixed policy tốt nhất trong Full20, cho thấy CP3 verification có utility
+   cao nhất trên sample này.
+4. Kết quả củng cố mục tiêu chính của budget controller: chọn đúng task và đúng
+   checkpoint, không phải gọi Teacher nhiều nhất có thể.
+5. Hai sample được stratify chủ động trên training split và có kích thước nhỏ;
+   accuracy không phải population estimate cho toàn bộ 531 task, cũng không phải
+   frozen-test generalization. Cần mở rộng paired collection hoặc dùng confidence
+   intervals theo task trước khi đưa ra claim tổng quát.
+
+Artifacts:
+
+- [VVV40 report](../results/darc_qwen38_vvv40/report/darc_qwen38_vvv40_report.md)
+- [VVV40 task results](../results/darc_qwen38_vvv40/tables/task_results.csv)
+- [VVV40 checkpoint results](../results/darc_qwen38_vvv40/tables/checkpoint_results.csv)
+- [Full20 report](../results/darc_qwen38_full20/report/darc_qwen38_full20_report.md)
+- [Full20 trajectory comparison](../results/darc_qwen38_full20/tables/trajectory_comparison.csv)
+- [Full20 checkpoint effects](../results/darc_qwen38_full20/tables/checkpoint_effects.csv)
+- [Full20 oracle comparison](../results/darc_qwen38_full20/tables/task_oracle_comparison.csv)
+
+## 33. DARC v0.5 Myopic i0 retrain trên Qwen3.8 Full-8
+
+Thí nghiệm này kiểm tra liệu controller tốt nhất trước đây có học được verification
+value của Teacher Qwen3.8 hay không. `140` task Qwen3.8 có đủ tám trajectory được
+chia outcome-blind thành `112` development tasks và `28` retrospective held-out
+tasks. Trên `112` task, model selection, early stopping và policy calibration chỉ
+dùng bốn-fold task-grouped OOF; held-out không được dùng để tune. Bộ `30` task
+prospective riêng vẫn chưa được truy cập: giữ nguyên 20 task đã khóa và bổ sung 10
+task deterministic, disjoint, để dành cho confirmatory run sau.
+
+Hai initialization được so sánh với cùng kiến trúc DARC v0.5 Myopic iteration 0,
+cùng ba seed và cùng budget protocol:
+
+- **Qwen3.8 scratch:** train controller mới từ random initialization.
+- **Qwen2.5 transfer:** warm-start từ DARC/v0.4 Qwen2.5 rồi fine-tune bằng Qwen3.8.
+
+### 33.1. OOF model selection trên 112 development tasks
+
+| Variant | OOF accuracy | Actual Teacher tokens | Selection score | Selected |
+|---|---:|---:|---:|---:|
+| **Qwen3.8 scratch** | **56.55%** | 1,449,814 | **0.5611** | **Yes** |
+| Qwen2.5 transfer | 56.25% | **1,352,038** | 0.5585 | No |
+
+Scratch chỉ hơn `+0.30` điểm phần trăm trên OOF và dùng thêm khoảng `97.8K`
+tokens. Vì vậy việc chọn scratch là đúng theo selection objective đã khóa, nhưng
+OOF margin nhỏ và chưa phải evidence mạnh rằng random initialization luôn tốt hơn
+transfer.
+
+### 33.2. Kết quả trên 28 retrospective held-out tasks
+
+![Qwen3.8 held-out accuracy–token frontier](../results/darc_qwen38_myopic_retrain/figures/heldout_accuracy_cost.png)
+
+| Policy | Accuracy, task-bootstrap 95% CI | Actual tokens | Calls | Helpful / Harmful / No-change |
+|---|---:|---:|---:|---:|
+| Never Verify | 21.43% [7.14, 39.29] | 0 | 0.0 | 0 / 0 / 0 |
+| Always CP1 | 60.71% [42.86, 78.57] | 133,685 | 28.0 | 11 / 0 / 17 |
+| Always CP2 | 60.71% [42.86, 78.57] | **130,506** | 28.0 | 11 / 0 / 17 |
+| **Always CP3** | 64.29% [46.43, 82.14] | 149,871 | 28.0 | 12 / 0 / 16 |
+| Qwen2.5-transfer DARC | 60.71% [44.05, 77.38] | 316,004 | 65.0 | 11 / 0 / 54 |
+| **Qwen3.8-scratch DARC** | **67.86% [50.00, 82.14]** | **330,383** | **68.3** | **13 / 0 / 55.3** |
+| Always VVV | **67.86% [50.00, 82.14]** | 398,698 | 84.0 | 13 / 0 / 71 |
+
+Scratch DARC đạt `19/28`, bằng Always VVV nhưng giảm khoảng `68,315` actual
+Teacher tokens (`17.1%`) và `15.7` calls (`18.7%`). Cả ba scratch seeds đều giải
+đúng `19/28`, dù token còn dao động từ `318,597` đến `349,982`. Transfer kém ổn
+định hơn: ba seed lần lượt giải `19`, `15` và `17` task.
+
+### 33.3. Matched-budget Pareto analysis
+
+| Global budget | Qwen3.8-scratch DARC | DARC tokens | Always CP3 | CP3 tokens | Kết luận |
+|---:|---:|---:|---:|---:|---|
+| 25% | 46.43% | 87.7K | **48.81%** | **86.9K** | CP3 dominates |
+| 50% | 55.95% | 192.3K | **64.29%** | **149.9K** | CP3 dominates |
+| 75% | 64.29% | 291.8K | **64.29%** | **149.9K** | CP3 cùng accuracy, rẻ hơn |
+| 100% | **67.86%** | 330.4K | 64.29% | **149.9K** | DARC thêm 1 task nhưng tốn 2.20x tokens |
+
+DARC vì vậy chưa tạo Pareto frontier tốt hơn fixed CP3 ở budget thấp/trung bình.
+Ưu điểm được xác nhận là **giữ accuracy của VVV và cắt bớt Verify dư thừa**, không
+phải vượt mọi checkpoint baseline về accuracy–cost.
+
+### 33.4. Decision behavior và oracle gap
+
+Ở full budget, scratch Verify CP1 cho cả `28/28` task ở mọi seed. Verify counts
+CP1/CP2/CP3 theo seed lần lượt là `28/24/20`, `28/23/17` và `28/23/14`; action
+sequences hầu hết là `VVV`, `VVS` hoặc `VSV`. Controller do đó chủ yếu học bỏ một
+phần CP2/CP3 calls sau khi đã Verify CP1, chưa học tốt khi nào nên Skip Teacher từ
+đầu.
+
+Trong trung bình `68.3` calls chỉ có `13` Helpful, `0` Harmful và `55.3`
+No-change: khoảng `81%` interventions không đổi final correctness. Always CP3 đạt
+`12` Helpful trong chỉ `28` calls, nên có selection precision cao hơn đáng kể.
+
+Observed offline oracle trên cùng 28 task giải được `22/28 = 78.57%`, trong khi
+DARC và VVV dừng ở `19/28 = 67.86%`. Còn ba task có successful trajectory trong
+dữ liệu nhưng controller không chọn đúng sequence.
+
+### 33.5. Kết luận và giới hạn claim
+
+1. **Teacher-specific retraining có ích:** scratch ổn định hơn Qwen2.5 transfer trên
+   held-out, cho thấy correction distribution thay đổi theo Teacher.
+2. **Token pruning thành công:** scratch giữ nguyên VVV accuracy với ít hơn `17.1%`
+   tokens.
+3. **Checkpoint allocation chưa đạt:** CP1 luôn được Verify và CP3-only vẫn là
+   Pareto baseline mạnh nhất ở đa số budget.
+4. **CI còn rộng:** DARC CI `[50.00, 82.14]` chồng lấn mạnh với CP3
+   `[46.43, 82.14]`; chưa thể kết luận superiority có ý nghĩa thống kê.
+5. Đây là retrospective internal holdout từ cohort đã từng được inspect, không phải
+   frozen-test hoặc prospective evidence. Kết luận cuối phải chờ `30` task sealed
+   prospective và không được tune tiếp bằng outcome của chúng.
+
+Artifacts:
+
+- [Qwen3.8 DARC retrain report](../results/darc_qwen38_myopic_retrain/report/darc_qwen38_myopic_retrain_report.md)
+- [Held-out aggregate table](../results/darc_qwen38_myopic_retrain/tables/heldout_aggregate.csv)
+- [OOF variant selection](../results/darc_qwen38_myopic_retrain/tables/variant_selection_oof.csv)
+
+## 34. Qwen3.8 Downstream-Interaction Audit trên 210 Full-8 tasks
+
+Phần này chỉ phân tích dữ liệu counterfactual đã thu thập, chưa cập nhật hay đánh
+giá thêm controller. Audit gộp `210` training tasks có đủ tám branch-consistent
+trajectories, tương ứng `1,680` final outcomes:
+
+| Dataset | Full-8 tasks | Trajectories |
+|---|---:|---:|
+| BigCodeBench | 124 | 992 |
+| HumanEval | 44 | 352 |
+| LiveCodeBench | 42 | 336 |
+| **Tổng** | **210** | **1,680** |
+
+Với downstream suffix `x_2x_3`, tác dụng paired của Verify tại CP1 được định
+nghĩa là:
+
+\[
+A_{CP1}(x_2,x_3)
+=Y(V,x_2,x_3)-Y(S,x_2,x_3)\in\{-1,0,+1\}.
+\]
+
+Do đó mỗi task cung cấp bốn CP1 contrasts (`SS`, `SV`, `VS`, `VV`), tổng cộng
+`840` paired comparisons. Confidence interval được tính bằng `20,000` lần
+task-clustered bootstrap; các trajectory trong cùng task không được coi là sample
+độc lập.
+
+![CP1 downstream interaction trên 210 Qwen3.8 Full-8 tasks](../results/qwen38_downstream_interaction_210/figures/cp1_downstream_interaction.png)
+
+*Hình 34.1 — Panel (a) cho thấy net final-accuracy effect của cùng một hành động
+Verify CP1 thay đổi mạnh theo CP2/CP3 continuation. Error bar là task-bootstrap
+95% CI. Panel (b) giữ CP2=Skip và đếm cách effect của CP1 thay đổi khi CP3 chuyển
+từ Skip sang Verify; `70/210` task nằm ngoài trạng thái effect bất biến. Panel (c)
+tóm tắt evidence chính cho non-myopic verification. Đây là paired evidence trên
+210 stratified training tasks, không phải population prevalence estimate.*
+
+### 34.1. Finding 1 — Verification utility phụ thuộc downstream decisions
+
+| Quyết định sau CP1 | So sánh paired | Helpful | Harmful | No-change | Net benefit | Bootstrap 95% CI |
+|---|---|---:|---:|---:|---:|---:|
+| CP2 Skip, CP3 Skip | `SSS → VSS` | 50 | 2 | 158 | **+22.86 pp** | `[+17.14, +29.05]` |
+| CP2 Skip, CP3 Verify | `SSV → VSV` | 16 | 14 | 180 | **+0.95 pp** | `[−4.29, +6.19]` |
+| CP2 Verify, CP3 Skip | `SVS → VVS` | 29 | 16 | 165 | **+6.19 pp** | `[0.00, +12.38]` |
+| CP2 Verify, CP3 Verify | `SVV → VVV` | 6 | 16 | 188 | **−4.76 pp** | `[−9.05, −0.48]` |
+
+Cùng một hành động `Verify CP1` thay đổi từ `+22.86` xuống `−4.76` điểm phần
+trăm tùy continuation. Khi giữ CP2=Skip, interaction contrast là:
+
+\[
+A_{CP1}(S,V)-A_{CP1}(S,S)=-21.90\ \text{pp},
+\]
+
+với bootstrap 95% CI `[−29.05, −14.76]`, không chứa `0`. Khi giữ CP2=Verify,
+interaction tương ứng là `−10.95 pp`, CI `[−16.67, −5.24]`. Đây là evidence mạnh
+nhất cho thấy một controller chỉ chấm điểm artifact CP1 độc lập với continuation
+policy có thể chọn sai checkpoint.
+
+Khi CP2=Skip, CP3 làm thay đổi effect của CP1 trên `70/210 = 33.3%` task:
+
+- `46` task: CP1 từ Helpful thành No-change — giá trị sớm bị CP3 thay thế;
+- `12` task: CP1 từ No-change thành Helpful khi CP3 cũng Verify;
+- `12` task: CP1 từ No-change thành Harmful khi CP3 cũng Verify;
+- `140` task giữ nguyên effect, gồm `134` No-change, `4` Helpful và `2` Harmful.
+
+### 34.2. Finding 2 — Verification có thể gây hại
+
+Trên bốn downstream contexts, `83/210 = 39.5%` task có tác dụng CP1 thay đổi ít
+nhất một lần. `8/210 = 3.8%` task chứa cả Helpful và Harmful CP1 effects giữa các
+context khác nhau. Con số `8` là strict reversal khi xét toàn bộ bốn suffix; nó
+không có nghĩa có tám direct `Helpful → Harmful` transitions chỉ do đổi CP3 trong
+khi giữ CP2 cố định.
+
+| Dataset | Context-dependent CP1 | Strict Helpful↔Harmful reversal |
+|---|---:|---:|
+| BigCodeBench | 46/124 (37.1%) | 5/124 (4.0%) |
+| HumanEval | 14/44 (31.8%) | 0/44 (0.0%) |
+| LiveCodeBench | 23/42 (54.8%) | 3/42 (7.1%) |
+| **Tổng** | **83/210 (39.5%)** | **8/210 (3.8%)** |
+
+Khi CP2 và CP3 đều Verify, thêm CP1 cho `6` Helpful nhưng `16` Harmful cases,
+tạo net effect `−4.76 pp`. Verify vì vậy không chỉ là thao tác sửa lỗi cục bộ: nó
+thay đổi artifact và trajectory mà Coder/Reviewer tiếp tục xử lý, đôi khi phá một
+trajectory vốn sẽ thành công.
+
+### 34.3. Finding 3 — Giá trị bổ sung của CP1 thường bị CP3 thay thế
+
+Trong comparison đúng với câu hỏi `SSV ↔ VSV`:
+
+| Dataset | Helpful (`SSV=0,VSV=1`) | Harmful (`SSV=1,VSV=0`) | No-change | Net |
+|---|---:|---:|---:|---:|
+| BigCodeBench | 9 | 13 | 102 | −3.23 pp |
+| HumanEval | 0 | 0 | 44 | 0.00 pp |
+| LiveCodeBench | 7 | 1 | 34 | +14.29 pp |
+| **Tổng** | **16** | **14** | **180** | **+0.95 pp** |
+
+Khi biết chắc CP3 sẽ Verify, CP1 không có aggregate benefit đáng tin cậy:
+`+0.95 pp`, CI `[−4.29, +6.19]`. Tuy nhiên `16` Helpful và `14` Harmful cases cho
+thấy aggregate gần `0` không có nghĩa CP1 luôn vô dụng; nó che giấu task-level
+heterogeneity lớn. Ví dụ `LiveCodeBench/abc391_e` và `BigCodeBench/628` được cứu
+bởi CP1 trong `VSV`, trong khi `BigCodeBench/302` và
+`LiveCodeBench/abc396_g` bị hại.
+
+Ở thời điểm CP1, controller không biết outcome tương lai. Bài toán phù hợp vì vậy
+không phải dự đoán riêng `CP1 có lỗi hay không`, mà là ước lượng:
+
+\[
+\text{Value(Verify now)}-\text{Value(Wait for downstream verification)}
+\]
+
+dưới budget còn lại và continuation policy dự kiến. Đây là cơ sở dữ liệu trực
+tiếp cho **Non-Myopic Verification**; chưa phải bằng chứng rằng một thuật toán
+continuation cụ thể đã học được signal này.
+
+### 34.4. Phạm vi claim
+
+Các kết luận trên là observed paired evidence hợp lệ trong `210` task đã thu thập.
+Tuy nhiên cohort được stratify chủ động và không phải random sample của toàn bộ
+CBV-Bench, nên các tỷ lệ `39.5%` hay `3.8%` không được trình bày như prevalence
+trên population. Claim an toàn là: **downstream-dependent verification utility tồn
+tại với quy mô đáng kể trong observed data, và interaction trung bình CP1–CP3 có
+CI không chứa 0**.
+
+Artifacts tái lập:
+
+- [Figure PNG](../results/qwen38_downstream_interaction_210/figures/cp1_downstream_interaction.png)
+- [Figure PDF](../results/qwen38_downstream_interaction_210/figures/cp1_downstream_interaction.pdf)
+- [Context summary](../results/qwen38_downstream_interaction_210/tables/cp1_context_summary.csv)
+- [Task-level SSV–VSV effects](../results/qwen38_downstream_interaction_210/tables/ssv_vsv_task_effects.csv)
+- Script: `scripts/analyze_qwen38_cp1_interaction.py`

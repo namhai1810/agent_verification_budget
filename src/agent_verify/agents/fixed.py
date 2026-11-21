@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel
 
@@ -77,6 +78,15 @@ class AgentOutput:
     messages: list[Message]
 
 
+class ReviewLinesArtifact(BaseModel):
+    """Line-safe Reviewer wire format used only after proven JSON escape loops."""
+
+    code_lines: list[str]
+    review_summary: str
+    issues_found: list[str]
+    changed: bool
+
+
 class PlannerAgent:
     role = "planner"
     checkpoint = 1
@@ -123,9 +133,15 @@ class CoderAgent:
     role = "coder"
     checkpoint = 2
 
-    def __init__(self, client: LLMClient, model: ModelConfig) -> None:
+    def __init__(
+        self,
+        client: LLMClient,
+        model: ModelConfig,
+        request_overrides: dict[str, Any] | None = None,
+    ) -> None:
         self.client = client
         self.model = model
+        self.request_overrides = dict(request_overrides or {})
 
     def run(
         self,
@@ -155,6 +171,7 @@ class CoderAgent:
             messages=messages,
             output_schema=CodeArtifact,
             context=context,
+            request_overrides=self.request_overrides,
             mock_factory=lambda: CodeArtifact(
                 code=_mock_code(task),
                 implementation_notes=(
@@ -174,10 +191,14 @@ class ReviewerAgent:
         client: LLMClient,
         model: ModelConfig,
         event_log: JsonlStore | None = None,
+        request_overrides: dict[str, Any] | None = None,
+        line_safe_output: bool = False,
     ) -> None:
         self.client = client
         self.model = model
         self.event_log = event_log
+        self.request_overrides = dict(request_overrides or {})
+        self.line_safe_output = line_safe_output
 
     def run(
         self,
@@ -186,6 +207,15 @@ class ReviewerAgent:
         code: CodeArtifact,
         context: InvocationContext,
     ) -> AgentOutput:
+        output_schema: type[BaseModel] = (
+            ReviewLinesArtifact if self.line_safe_output else ReviewArtifact
+        )
+        serialization_rule = (
+            "Return code_lines as one complete Python source line per JSON array item. "
+            "Do not encode source newlines inside a single JSON string. "
+            if self.line_safe_output
+            else ""
+        )
         messages = [
             Message(
                 role="system",
@@ -196,7 +226,9 @@ class ReviewerAgent:
                     "final Python source, correcting it only when justified. "
                     + _submission_rule(task)
                     + "Set changed=true if and only if the returned code differs from CODE after ignoring "
-                    "leading/trailing whitespace. " + _schema_rule(ReviewArtifact)
+                    "leading/trailing whitespace. "
+                    + serialization_rule
+                    + _schema_rule(output_schema)
                 ),
             ),
             Message(
@@ -211,16 +243,35 @@ class ReviewerAgent:
         result = self.client.invoke(
             model=self.model,
             messages=messages,
-            output_schema=ReviewArtifact,
+            output_schema=output_schema,
             context=context,
-            mock_factory=lambda: ReviewArtifact(
-                code=code.code,
-                review_summary="Mock reviewer preserved the placeholder unchanged.",
-                issues_found=["No semantic review is performed by the mock backend."],
-                changed=False,
+            request_overrides=self.request_overrides,
+            mock_factory=(
+                lambda: ReviewLinesArtifact(
+                    code_lines=code.code.splitlines(),
+                    review_summary="Mock reviewer preserved the placeholder unchanged.",
+                    issues_found=["No semantic review is performed by the mock backend."],
+                    changed=False,
+                )
+                if self.line_safe_output
+                else lambda: ReviewArtifact(
+                    code=code.code,
+                    review_summary="Mock reviewer preserved the placeholder unchanged.",
+                    issues_found=["No semantic review is performed by the mock backend."],
+                    changed=False,
+                )
             ),
         )
-        artifact = ReviewArtifact.model_validate(result.value.model_dump())
+        if self.line_safe_output:
+            wire = ReviewLinesArtifact.model_validate(result.value.model_dump())
+            artifact = ReviewArtifact(
+                code="\n".join(wire.code_lines),
+                review_summary=wire.review_summary,
+                issues_found=wire.issues_found,
+                changed=wire.changed,
+            )
+        else:
+            artifact = ReviewArtifact.model_validate(result.value.model_dump())
         actually_changed = artifact.code.strip() != code.code.strip()
         if artifact.changed != actually_changed:
             if self.event_log is not None:
