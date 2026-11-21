@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from agent_verify.budget import BudgetError, BudgetManager
@@ -7,6 +9,78 @@ from agent_verify.config import load_config
 from agent_verify.llm import LLMClient
 from agent_verify.logging import JsonlStore
 from agent_verify.schemas import InvocationContext, Message, PlanArtifact
+
+
+def test_thinking_api_separates_reasoning_and_sends_top_k(
+    default_config, monkeypatch, tmp_path
+) -> None:
+    captured: dict = {}
+    final = PlanArtifact(
+        summary="Valid plan",
+        algorithm=["Solve"],
+        edge_cases=[],
+        complexity="O(1)",
+    ).model_dump_json()
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "choices": [{
+                    "message": {
+                        "content": final,
+                        "reasoning_content": "private reasoning",
+                    },
+                    "finish_reason": "stop",
+                }],
+                "usage": {
+                    "prompt_tokens": 11,
+                    "completion_tokens": 23,
+                    "completion_tokens_details": {"reasoning_tokens": 17},
+                },
+            }
+
+    class FakeClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def post(self, _url: str, *, headers: dict, json: dict) -> FakeResponse:
+            captured["headers"] = headers
+            captured["payload"] = json
+            return FakeResponse()
+
+    provider = default_config.provider.model_copy(update={"response_format": "none"})
+    model = default_config.models.planner.model_copy(
+        update={"provider": "openai_compatible", "top_k": 20}
+    )
+    monkeypatch.setenv(provider.api_key_env, "test-key")
+    monkeypatch.setattr("agent_verify.llm.httpx.Client", FakeClient)
+    client = LLMClient(
+        provider,
+        BudgetManager(default_config.budget, provider),
+        JsonlStore(tmp_path / "invocations.jsonl"),
+    )
+    raw, input_tokens, output_tokens, metadata = client._call_api(
+        model,
+        [Message(role="user", content="solve")],
+        PlanArtifact,
+        seed=7,
+    )
+    assert json.loads(raw)["summary"] == "Valid plan"
+    assert (input_tokens, output_tokens) == (11, 23)
+    assert captured["payload"]["top_k"] == 20
+    assert "response_format" not in captured["payload"]
+    assert metadata["reasoning_content_present"] is True
+    assert metadata["reasoning_tokens"] == 17
+    assert "private reasoning" not in json.dumps(metadata)
 
 
 def test_default_and_inherited_config_are_valid(default_config, monkeypatch, tmp_path):

@@ -1,0 +1,81 @@
+schema_version: darc-qwen38-fulltree-config-v1
+
+data:
+  frozen_root: data/cbv_bench_v01_frozen_28102026
+  expected_tasks: 210
+  full8_roots:
+    - results/darc_qwen38_vvv40_full8
+    - results/darc_qwen38_full20
+    - results/darc_qwen38_full40_gpu0
+    - results/darc_qwen38_full40_gpu2
+    - results/darc_qwen38_full30_prospective_gpu2
+    - results/darc_qwen38_full30_extra_gpu0
+    - results/darc_qwen38_full10_extra_gpu0
+  historical_myopic_root: results/darc_qwen38_myopic_210
+
+output:
+  root: results/darc_qwen38_fulltree
+
+reproducibility:
+  seeds: [20261031, 20261101, 20261117]
+  fold_seed: 20261121
+  folds: 5
+  deterministic_torch: true
+  bootstrap_repetitions: 5000
+
+semantic_encoder:
+  model_id: microsoft/unixcoder-base
+  revision: main
+  max_length: 512
+  chunk_stride: 480
+  max_chunks_per_text: 5
+  batch_size: 32
+  device: auto
+  local_files_only: true
+  normalize: true
+
+model:
+  hidden_dim: 128
+  attention_heads: 4
+  dropout: 0.15
+  epochs: 60
+  task_batch_size: 32
+  learning_rate: 0.0005
+  weight_decay: 0.0001
+  gradient_clip_norm: 5.0
+
+optimization:
+  train_budget_fractions: [0.25, 0.50, 0.75, 1.0]
+  learn_lagrange: true
+  initial_lagrange: 0.05
+  dual_learning_rate: 0.10
+  max_lagrange: 20.0
+  entropy_weight: 0.002
+
+anchor:
+  cp_verify_probability: [0.08, 0.08, 0.85]
+  pretrain_epochs: 5
+  pretrain_weight: 1.0
+  kl_weight: 0.02
+
+crossval:
+  variants: [cp3_anchor, no_anchor]
+
+evaluation:
+  budget_fractions: [0.0, 0.25, 0.50, 0.75, 1.0]
+  deterministic_threshold: 0.50
+  # Protocol-level reserve, fixed before CV evaluation. Actual per-task future
+  # cost is never used for online admission.
+  hard_call_token_reserve: 20000
+  frozen_test_access: forbidden
+  validation_access: forbidden
+  prospective_access: forbidden
+
+final_fit:
+  variant: cp3_anchor
+  label: trained_on_all_210_not_independently_evaluated
+
+monitoring:
+  tqdm: true
+  mininterval_seconds: 1.0
+  save_every_epoch: true

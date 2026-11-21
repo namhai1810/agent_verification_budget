@@ -2,12 +2,16 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-STATE_DIR="${PROJECT_DIR}/results/vllm_gpu2"
+STATE_DIR="${STATE_DIR:-${PROJECT_DIR}/results/vllm_gpu2}"
 GPU_ID="${GPU_ID:-2}"
 CHILD_PORT="${CHILD_PORT:-8011}"
 TEACHER_PORT="${TEACHER_PORT:-8012}"
 CHILD_MODEL="${CHILD_MODEL:-Qwen/Qwen2.5-Coder-7B-Instruct-AWQ}"
 TEACHER_MODEL="${TEACHER_MODEL:-Qwen/Qwen2.5-Coder-32B-Instruct-AWQ}"
+TEACHER_SERVED_MODEL_NAME="${TEACHER_SERVED_MODEL_NAME:-${TEACHER_MODEL}}"
+TEACHER_LANGUAGE_MODEL_ONLY="${TEACHER_LANGUAGE_MODEL_ONLY:-0}"
+TEACHER_DEFAULT_CHAT_TEMPLATE_KWARGS="${TEACHER_DEFAULT_CHAT_TEMPLATE_KWARGS:-}"
+TEACHER_REASONING_PARSER="${TEACHER_REASONING_PARSER:-}"
 VLLM_BIN="${VLLM_BIN:-vllm}"
 CHILD_MEMORY_FRACTION="${CHILD_MEMORY_FRACTION:-0.23}"
 TEACHER_MEMORY_FRACTION="${TEACHER_MEMORY_FRACTION:-0.62}"
@@ -19,7 +23,7 @@ STARTUP_TIMEOUT_SECONDS="${STARTUP_TIMEOUT_SECONDS:-600}"
 mkdir -p "${STATE_DIR}"
 
 usage() {
-  echo "Usage: bash scripts/start_vllm_gpu2.sh {start|start-child|start-teacher|status|stop|logs}"
+  echo "Usage: bash scripts/start_vllm_gpu2.sh {start|start-child|start-teacher|status|stop|stop-child|stop-teacher|logs}"
 }
 
 wait_for_api() {
@@ -67,6 +71,19 @@ start_teacher() {
   wait_for_api teacher "$TEACHER_PORT"
 }
 
+with_start_lock() {
+  local name="$1"
+  shift
+  local lock_file="${STATE_DIR}/${name}.start.lock"
+  local lock_fd
+  exec {lock_fd}>"${lock_file}"
+  if ! flock -n "${lock_fd}"; then
+    echo "${name}: another startup is already in progress; refusing a duplicate launch." >&2
+    return 1
+  fi
+  "$@"
+}
+
 require_vllm() {
   if [[ "${VLLM_BIN}" == */* ]]; then
     [[ -x "${VLLM_BIN}" ]] || {
@@ -91,6 +108,29 @@ start_server() {
   local memory_fraction="$4"
   local pid_file="${STATE_DIR}/${name}.pid"
   local log_file="${STATE_DIR}/${name}.log"
+  local extra_args=()
+
+  if [[ -f "${pid_file}" ]]; then
+    local tracked_pid
+    tracked_pid="$(<"${pid_file}")"
+    if [[ "${tracked_pid}" =~ ^[0-9]+$ ]] && kill -0 "${tracked_pid}" 2>/dev/null; then
+      echo "${name}: tracked process ${tracked_pid} is already running; refusing a duplicate launch." >&2
+      exit 1
+    fi
+  fi
+
+  if [[ "${name}" == "teacher" ]]; then
+    extra_args+=(--served-model-name "${TEACHER_SERVED_MODEL_NAME}")
+    if [[ "${TEACHER_LANGUAGE_MODEL_ONLY}" == "1" ]]; then
+      extra_args+=(--language-model-only)
+    fi
+    if [[ -n "${TEACHER_DEFAULT_CHAT_TEMPLATE_KWARGS}" ]]; then
+      extra_args+=(--default-chat-template-kwargs "${TEACHER_DEFAULT_CHAT_TEMPLATE_KWARGS}")
+    fi
+    if [[ -n "${TEACHER_REASONING_PARSER}" ]]; then
+      extra_args+=(--reasoning-parser "${TEACHER_REASONING_PARSER}")
+    fi
+  fi
 
   if port_is_open "${port}"; then
     echo "Port ${port} is already in use; refusing to start ${name}." >&2
@@ -104,6 +144,7 @@ start_server() {
     --max-model-len "${MAX_MODEL_LEN}" \
     --max-num-seqs "${MAX_NUM_SEQS}" \
     --enforce-eager \
+    "${extra_args[@]}" \
     >"${log_file}" 2>&1 &
   local pid=$!
   echo "${pid}" >"${pid_file}"
@@ -152,9 +193,32 @@ stop_server() {
     echo "${name}: pid ${pid} is not a vLLM server; refusing to stop it." >&2
     return 1
   fi
+  local expected_port expected_model
+  if [[ "${name}" == "teacher" ]]; then
+    expected_port="${TEACHER_PORT}"
+    expected_model="${TEACHER_MODEL}"
+  else
+    expected_port="${CHILD_PORT}"
+    expected_model="${CHILD_MODEL}"
+  fi
+  if [[ "${command_line}" != *"--port ${expected_port}"* || \
+        "${command_line}" != *"serve ${expected_model}"* ]]; then
+    echo "${name}: pid ${pid} does not match expected model/port; refusing to stop it." >&2
+    echo "Expected model=${expected_model}, port=${expected_port}" >&2
+    return 1
+  fi
   kill "${pid}"
-  rm -f "${pid_file}"
   echo "${name}: sent SIGTERM to pid ${pid}"
+  local deadline=$((SECONDS + 60))
+  while kill -0 "${pid}" 2>/dev/null && (( SECONDS < deadline )); do
+    sleep 1
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    echo "${name}: pid ${pid} did not stop within 60s; refusing to send SIGKILL." >&2
+    return 1
+  fi
+  rm -f "${pid_file}"
+  echo "${name}: stopped"
 }
 
 action="${1:-start}"
@@ -166,8 +230,8 @@ case "${action}" in
       echo "Run: bash scripts/start_vllm_gpu2.sh status" >&2
       exit 1
     fi
-    start_child
-    start_teacher
+    with_start_lock child start_child
+    with_start_lock teacher start_teacher
     echo "Both loaders are ready on physical GPU ${GPU_ID}."
     echo "Monitor with: bash scripts/start_vllm_gpu2.sh logs"
     ;;
@@ -177,7 +241,7 @@ case "${action}" in
       echo "Port ${CHILD_PORT} is already in use; refusing to start child." >&2
       exit 1
     fi
-    start_child
+    with_start_lock child start_child
     ;;
   start-teacher)
     require_vllm
@@ -185,7 +249,7 @@ case "${action}" in
       echo "Port ${TEACHER_PORT} is already in use; refusing to start teacher." >&2
       exit 1
     fi
-    start_teacher
+    with_start_lock teacher start_teacher
     ;;
   status)
     show_server child "${CHILD_PORT}"
@@ -193,6 +257,12 @@ case "${action}" in
     ;;
   stop)
     stop_server child
+    stop_server teacher
+    ;;
+  stop-child)
+    stop_server child
+    ;;
+  stop-teacher)
     stop_server teacher
     ;;
   logs)

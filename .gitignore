@@ -115,6 +115,7 @@ test_*
 !tests/test_llm_thinking_budget.py
 !tests/test_qwen38_vvv_pilot.py
 !tests/test_qwen38_full_pilot.py
+!tests/test_darc_fulltree.py
 
 *.sh
 *.yaml
@@ -126,3 +127,9 @@ test_*
 *.yml
 *.json
 *.csv
+
+# Full-Tree implementation entrypoints and regression contracts.
+!configs/darc_qwen38_fulltree.yaml
+!scripts/run_darc_fulltree.py
+!scripts/run_darc_fulltree.sh
+!tests/test_darc_fulltree.py

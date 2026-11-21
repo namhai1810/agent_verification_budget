@@ -32,9 +32,11 @@ def _read_json(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _task_catalog(frozen_root: Path) -> dict[str, FrozenTask]:
+def _task_catalog(
+    frozen_root: Path, splits: tuple[str, ...] = ("train", "validation", "test")
+) -> dict[str, FrozenTask]:
     tasks: dict[str, FrozenTask] = {}
-    for split in ("train", "validation", "test"):
+    for split in splits:
         partition, _rows = load_frozen_partition(frozen_root, split)
         overlap = set(tasks) & set(partition)
         if overlap:
@@ -97,10 +99,11 @@ def load_qwen38_full8_groups(
     *,
     frozen_root: Path,
     expected_tasks: int | None = None,
+    catalog_splits: tuple[str, ...] = ("train", "validation", "test"),
 ) -> tuple[dict[str, TaskTrajectories], dict[str, dict[str, Any]]]:
     """Load completed, mutually disjoint Qwen3.8 shared-prefix trees."""
 
-    catalog = _task_catalog(frozen_root)
+    catalog = _task_catalog(frozen_root, catalog_splits)
     groups: dict[str, TaskTrajectories] = {}
     metadata: dict[str, dict[str, Any]] = {}
     for root in roots:
